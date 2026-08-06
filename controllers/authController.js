@@ -3,39 +3,25 @@ const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const Member = require('../models/Member');
+const AdminAccess = require('../models/AdminAccess');
+const AdminAuditLog = require('../models/AdminAuditLog');
 const { JWT_SECRET } = require('../middleware/auth');
 
-// In-memory fallback auth store for offline development when DB connection is pending
-const MOCK_AUTH_USERS = [
-  {
-    _id: 'u_admin_demo',
-    username: 'Super Admin',
-    email: 'admin@gfgcampus.org',
-    passwordHash: '$2a$10$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPG.a.37u', // bcrypt hash for 'admin123'
-    role: 'Super Admin',
-    accountType: 'Member',
-    memberRef: 'm_saquib'
-  }
-];
-
-// SIGNUP HANDLER
+// SIGNUP HANDLER (Public User Signup -> Visitor)
 exports.signup = async (req, res) => {
   try {
     const { fullName, email, phone, password, confirmPassword, isJamia, collegeName, course } = req.body;
 
-    // 1. Basic Field Validation
     if (!fullName || !email || !password || !confirmPassword || isJamia === undefined) {
       return res.status(400).json({ success: false, message: 'Please fill in all required onboarding fields.' });
     }
 
-    // 2. Email Syntax Validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const normalizedEmail = email.trim().toLowerCase();
     if (!emailRegex.test(normalizedEmail)) {
-      return res.status(400).json({ success: false, message: 'Please provide a syntactically valid email address (e.g. name@domain.com).' });
+      return res.status(400).json({ success: false, message: 'Please provide a valid email address (e.g. name@domain.com).' });
     }
 
-    // 3. Password Policy & Confirmation Match
     if (password.length < 8) {
       return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
     }
@@ -43,7 +29,6 @@ exports.signup = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Password and Confirm Password do not match.' });
     }
 
-    // 4. Conditional College Validation
     const institutionType = isJamia === true || isJamia === 'true' ? 'jamia_hamdard' : 'other';
     const finalCollegeName = institutionType === 'jamia_hamdard' ? 'Jamia Hamdard' : (collegeName || '').trim();
 
@@ -51,32 +36,27 @@ exports.signup = async (req, res) => {
       return res.status(400).json({ success: false, message: 'College / University Name is required when you are not from Jamia Hamdard.' });
     }
 
-    // 5. MongoDB vs Offline Memory Store Operations
     if (mongoose.connection.readyState === 1) {
-      // Check existing email
       const existingUser = await User.findOne({ email: normalizedEmail });
       if (existingUser) {
         return res.status(400).json({ success: false, message: 'This email is already registered. Please sign in instead.' });
       }
 
-      // Hash password
       const hashedPassword = await bcrypt.hash(password, 10);
 
-      // Create linked Member profile document first as VISITOR
       const newMember = await Member.create({
         name: fullName.trim(),
         email: normalizedEmail,
         phone: phone ? phone.trim() : '',
         teamName: 'General',
-        role: 'Visitor', // STRICT BUSINESS RULE: ALWAYS VISITOR ON SIGNUP
-        accountType: 'Visitor', // STRICT BUSINESS RULE
-        membershipStatus: 'pending', // STRICT BUSINESS RULE
+        role: 'Visitor',
+        accountType: 'Visitor',
+        membershipStatus: 'pending',
         photo: `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName)}&background=2f9e44&color=fff&bold=true`,
         about: `Student at ${finalCollegeName}. Joined GFG Campus Community.`,
         session: '2026–27'
       });
 
-      // Create User authentication identity
       const newUser = await User.create({
         username: fullName.trim(),
         email: normalizedEmail,
@@ -90,11 +70,11 @@ exports.signup = async (req, res) => {
         avatar: newMember.photo
       });
 
-      // Update Member with userRef
       newMember.userRef = newUser._id;
       await newMember.save();
 
-      // Sign JWT
+      req.app.get('io')?.emit('admin:member-created', { member: newMember, user: newUser });
+
       const token = jwt.sign(
         { id: newUser._id, username: newUser.username, email: newUser.email, role: 'Visitor', memberId: newMember._id },
         JWT_SECRET,
@@ -116,71 +96,15 @@ exports.signup = async (req, res) => {
         member: newMember
       });
     } else {
-      // Offline fallback
-      const existing = MOCK_AUTH_USERS.find(u => u.email === normalizedEmail);
-      if (existing) {
-        return res.status(400).json({ success: false, message: 'This email is already registered. Please sign in instead.' });
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const newId = `u_${Date.now()}`;
-      const memberId = `m_${Date.now()}`;
-
-      const mockMemberDoc = {
-        _id: memberId,
-        name: fullName.trim(),
-        email: normalizedEmail,
-        phone: phone || '',
-        teamName: 'General',
-        role: 'Visitor',
-        accountType: 'Visitor',
-        membershipStatus: 'pending',
-        photo: `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName)}&background=2f9e44&color=fff&bold=true`,
-        session: '2026–27',
-        createdAt: new Date()
-      };
-
-      const mockUserDoc = {
-        _id: newId,
-        username: fullName.trim(),
-        email: normalizedEmail,
-        passwordHash: hashedPassword,
-        role: 'Visitor',
-        accountType: 'Visitor',
-        institutionType,
-        collegeName: finalCollegeName,
-        course: course || '',
-        memberRef: memberId
-      };
-
-      MOCK_AUTH_USERS.push(mockUserDoc);
-
-      const token = jwt.sign(
-        { id: newId, username: fullName, email: normalizedEmail, role: 'Visitor', memberId },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      return res.status(201).json({
-        success: true,
-        message: 'Account created successfully as Visitor. Welcome to GFG Campus Community!',
-        token,
-        user: {
-          id: newId,
-          username: fullName,
-          email: normalizedEmail,
-          role: 'Visitor',
-          collegeName: finalCollegeName
-        },
-        member: mockMemberDoc
-      });
+      return res.status(503).json({ success: false, message: 'Database connection offline. Please check MongoDB Atlas connection.' });
     }
   } catch (err) {
+    console.error('[Signup Error]:', err);
     return res.status(500).json({ success: false, message: 'Signup failed: ' + err.message });
   }
 };
 
-// LOGIN HANDLER
+// PUBLIC USER LOGIN HANDLER
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -194,33 +118,6 @@ exports.login = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
     }
 
-    // Default Super Admin hardcoded check fallback
-    if ((normalizedEmail === 'admin@gfgcampus.org' || normalizedEmail === 'admin@gfg.org') && password === 'admin123') {
-      const token = jwt.sign(
-        { id: 'admin_demo_id', username: 'Super Admin', email: normalizedEmail, role: 'Super Admin' },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      const adminMember = {
-        _id: 'm_saquib',
-        name: 'Super Admin',
-        email: normalizedEmail,
-        role: 'Campus Mantri',
-        accountType: 'Member',
-        membershipStatus: 'active',
-        membershipId: 'GFG-JH-2026-001',
-        photo: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80'
-      };
-
-      return res.json({
-        success: true,
-        token,
-        user: { id: 'admin_demo_id', username: 'Super Admin', email: normalizedEmail, role: 'Super Admin' },
-        member: adminMember
-      });
-    }
-
     if (mongoose.connection.readyState === 1) {
       const user = await User.findOne({ email: normalizedEmail }).populate('memberRef');
       if (!user) {
@@ -232,13 +129,12 @@ exports.login = async (req, res) => {
         return res.status(401).json({ success: false, message: 'Invalid email or password.' });
       }
 
-      let member = user.memberRef;
-      if (!member) {
-        member = await Member.findOne({ email: normalizedEmail });
-      }
+      let member = user.memberRef || await Member.findOne({ email: normalizedEmail });
+
+      const adminAccess = await AdminAccess.findOne({ userRef: user._id, status: 'Active' });
 
       const token = jwt.sign(
-        { id: user._id, username: user.username, email: user.email, role: member?.role || user.role },
+        { id: user._id, username: user.username, email: user.email, role: member?.role || user.role, isAdmin: !!adminAccess },
         JWT_SECRET,
         { expiresIn: '7d' }
       );
@@ -253,52 +149,152 @@ exports.login = async (req, res) => {
           role: user.role,
           collegeName: user.collegeName
         },
-        member: member || {
-          _id: `m_${user._id}`,
-          name: user.username,
-          email: user.email,
-          role: user.role,
-          accountType: 'Visitor',
-          membershipStatus: 'pending'
-        }
+        member: member || null,
+        adminAccess: adminAccess ? {
+          adminRole: adminAccess.adminRole,
+          permissions: adminAccess.permissions
+        } : null
       });
     } else {
-      // Offline fallback lookup
-      const user = MOCK_AUTH_USERS.find(u => u.email === normalizedEmail);
-      if (!user) {
-        return res.status(401).json({ success: false, message: 'Invalid email or password.' });
-      }
-
-      const isMatch = await bcrypt.compare(password, user.passwordHash);
-      if (!isMatch && password !== 'admin123') {
-        return res.status(401).json({ success: false, message: 'Invalid email or password.' });
-      }
-
-      const token = jwt.sign(
-        { id: user._id, username: user.username, email: user.email, role: user.role },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      const member = {
-        _id: user.memberRef || `m_${user._id}`,
-        name: user.username,
-        email: user.email,
-        role: user.role || 'Visitor',
-        accountType: user.accountType || 'Visitor',
-        membershipStatus: user.accountType === 'Member' ? 'active' : 'pending',
-        photo: `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=2f9e44&color=fff&bold=true`
-      };
-
-      return res.json({
-        success: true,
-        token,
-        user: { id: user._id, username: user.username, email: user.email, role: user.role },
-        member
-      });
+      return res.status(503).json({ success: false, message: 'Database connection offline. Please check MongoDB Atlas connection.' });
     }
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Login error: ' + err.message });
+  }
+};
+
+// 3-FACTOR SUPER ADMIN LOGIN HANDLER (Email + Password + Individual Admin PIN)
+exports.adminLogin = async (req, res) => {
+  const { email, password, pin } = req.body;
+  const ipAddress = req.ip || req.headers['x-forwarded-for'] || '';
+  const userAgent = req.headers['user-agent'] || '';
+
+  if (!email || !password || !pin) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Please provide Email, Password, and Admin PIN.' 
+    });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const cleanPin = String(pin).trim();
+
+  const logAudit = async (action, targetUser, details) => {
+    try {
+      await AdminAuditLog.create({
+        operatorRef: targetUser ? targetUser._id : null,
+        operatorEmail: normalizedEmail,
+        targetUserRef: targetUser ? targetUser._id : null,
+        targetEmail: normalizedEmail,
+        action,
+        details,
+        ipAddress,
+        userAgent
+      });
+    } catch (e) {
+      console.warn('[Audit Log Error]:', e.message);
+    }
+  };
+
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ 
+        success: false, 
+        message: 'Database connection offline. Admin login requires an active MongoDB connection.' 
+      });
+    }
+
+    // 1. User lookup
+    const user = await User.findOne({ email: normalizedEmail }).populate('memberRef');
+    if (!user) {
+      await logAudit('ADMIN_LOGIN_FAILED', null, 'Invalid identity');
+      return res.status(401).json({ success: false, message: 'Invalid administrative credentials.' });
+    }
+
+    // 2. AdminAccess lookup
+    const adminAccess = await AdminAccess.findOne({ userRef: user._id });
+    if (!adminAccess || adminAccess.status !== 'Active') {
+      await logAudit('ADMIN_LOGIN_FAILED', user, 'No active administrative access record');
+      return res.status(401).json({ success: false, message: 'Invalid administrative credentials.' });
+    }
+
+    // 3. Brute-force lockout check
+    if (adminAccess.lockedUntil && adminAccess.lockedUntil > new Date()) {
+      const minutesRemaining = Math.ceil((adminAccess.lockedUntil - new Date()) / (1000 * 60));
+      await logAudit('ADMIN_LOGIN_FAILED', user, `Attempt on locked account (${minutesRemaining} mins remaining)`);
+      return res.status(429).json({
+        success: false,
+        message: `Administrative access is temporarily locked due to excessive failed attempts. Try again in ${minutesRemaining} minutes.`
+      });
+    }
+
+    // 4. Verify Password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      adminAccess.failedLoginAttempts = (adminAccess.failedLoginAttempts || 0) + 1;
+      if (adminAccess.failedLoginAttempts >= 5) {
+        adminAccess.lockedUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 mins lock
+      }
+      await adminAccess.save();
+      await logAudit('ADMIN_LOGIN_FAILED', user, `Password incorrect (Attempt #${adminAccess.failedLoginAttempts})`);
+      return res.status(401).json({ success: false, message: 'Invalid administrative credentials.' });
+    }
+
+    // 5. Verify Admin PIN (pinHash)
+    const isPinValid = await bcrypt.compare(cleanPin, adminAccess.pinHash);
+    if (!isPinValid) {
+      adminAccess.failedLoginAttempts = (adminAccess.failedLoginAttempts || 0) + 1;
+      if (adminAccess.failedLoginAttempts >= 5) {
+        adminAccess.lockedUntil = new Date(Date.now() + 15 * 60 * 1000); // 15 mins lock
+      }
+      await adminAccess.save();
+      await logAudit('ADMIN_LOGIN_FAILED', user, `Admin PIN incorrect (Attempt #${adminAccess.failedLoginAttempts})`);
+      return res.status(401).json({ success: false, message: 'Invalid administrative credentials.' });
+    }
+
+    // 6. Reset Lockout & Log Success
+    adminAccess.failedLoginAttempts = 0;
+    adminAccess.lockedUntil = null;
+    adminAccess.lastLoginAt = new Date();
+    await adminAccess.save();
+
+    await logAudit('ADMIN_LOGIN_SUCCESS', user, `Successful administrative login as ${adminAccess.adminRole}`);
+
+    const token = jwt.sign(
+      { 
+        id: user._id, 
+        email: user.email, 
+        username: user.username,
+        adminRole: adminAccess.adminRole,
+        isAdmin: true 
+      },
+      JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+
+    let member = user.memberRef || await Member.findOne({ email: normalizedEmail });
+
+    return res.json({
+      success: true,
+      message: 'Administrative authentication successful.',
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role
+      },
+      member: member || null,
+      adminAccess: {
+        adminRole: adminAccess.adminRole,
+        permissions: adminAccess.permissions,
+        lastLoginAt: adminAccess.lastLoginAt
+      }
+    });
+
+  } catch (err) {
+    console.error('[Admin Login Error]:', err);
+    return res.status(500).json({ success: false, message: 'Administrative authentication error: ' + err.message });
   }
 };
 
@@ -313,33 +309,15 @@ exports.getMe = async (req, res) => {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, JWT_SECRET);
 
-    if (decoded.id === 'admin_demo_id') {
-      return res.json({
-        success: true,
-        user: { id: 'admin_demo_id', username: 'Super Admin', email: decoded.email, role: 'Super Admin' },
-        member: {
-          _id: 'm_saquib',
-          name: 'Super Admin',
-          email: decoded.email,
-          role: 'Campus Mantri',
-          accountType: 'Member',
-          membershipStatus: 'active',
-          membershipId: 'GFG-JH-2026-001',
-          photo: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80'
-        }
-      });
-    }
-
     if (mongoose.connection.readyState === 1) {
       const user = await User.findById(decoded.id).populate('memberRef');
       if (!user) {
         return res.status(404).json({ success: false, message: 'User not found.' });
       }
 
-      let member = user.memberRef;
-      if (!member) {
-        member = await Member.findOne({ email: user.email });
-      }
+      let member = user.memberRef || await Member.findOne({ email: user.email });
+
+      const adminAccess = await AdminAccess.findOne({ userRef: user._id, status: 'Active' });
 
       return res.json({
         success: true,
@@ -350,81 +328,132 @@ exports.getMe = async (req, res) => {
           role: user.role,
           collegeName: user.collegeName
         },
-        member: member || {
-          _id: `m_${user._id}`,
-          name: user.username,
-          email: user.email,
-          role: user.role,
-          accountType: 'Visitor',
-          membershipStatus: 'pending'
-        }
+        member: member || null,
+        adminAccess: adminAccess ? {
+          adminRole: adminAccess.adminRole,
+          permissions: adminAccess.permissions,
+          lastLoginAt: adminAccess.lastLoginAt
+        } : null
       });
     } else {
-      const u = MOCK_AUTH_USERS.find(item => item._id === decoded.id) || {
-        _id: decoded.id,
-        username: decoded.username || 'User',
-        email: decoded.email,
-        role: decoded.role || 'Visitor'
-      };
-
-      const member = {
-        _id: u.memberRef || `m_${u._id}`,
-        name: u.username,
-        email: u.email,
-        role: u.role || 'Visitor',
-        accountType: u.accountType || 'Visitor',
-        membershipStatus: u.accountType === 'Member' ? 'active' : 'pending',
-        photo: `https://ui-avatars.com/api/?name=${encodeURIComponent(u.username)}&background=2f9e44&color=fff&bold=true`
-      };
-
-      return res.json({
-        success: true,
-        user: { id: u._id, username: u.username, email: u.email, role: u.role },
-        member
-      });
+      return res.status(503).json({ success: false, message: 'Database connection offline.' });
     }
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
   }
 };
 
+// CHANGE PASSWORD HANDLER
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+    const userId = req.user?.id || req.user?._id;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required.' });
+    }
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Current password, new password, and confirm password are required.' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, message: 'New password must be at least 8 characters long.' });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'New password and confirm password do not match.' });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ success: false, message: 'Your new password must be different from your current password.' });
+    }
+
+    if (mongoose.connection.readyState === 1) {
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Account user record not found.' });
+      }
+
+      const isCurrentValid = await bcrypt.compare(currentPassword, user.password);
+      if (!isCurrentValid) {
+        return res.status(400).json({ success: false, message: 'Current password is incorrect.' });
+      }
+
+      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+      user.password = hashedNewPassword;
+      await user.save();
+
+      return res.json({
+        success: true,
+        message: '✓ Password updated successfully. Please sign in again.'
+      });
+    } else {
+      return res.status(503).json({ success: false, message: 'Database connection offline.' });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to update password: ' + err.message });
+  }
+};
+
+// CHANGE ADMIN PIN (Self Service)
+exports.changeAdminPin = async (req, res) => {
+  try {
+    const { currentPin, newPin, confirmPin } = req.body;
+    const userId = req.user?.id || req.user?._id;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Authentication required.' });
+    }
+
+    if (!currentPin || !newPin || !confirmPin) {
+      return res.status(400).json({ success: false, message: 'Current PIN, new PIN, and confirm PIN are required.' });
+    }
+
+    const cleanNewPin = String(newPin).trim();
+    if (cleanNewPin.length < 4 || cleanNewPin.length > 8) {
+      return res.status(400).json({ success: false, message: 'New Admin PIN must be between 4 and 8 digits (6 digits recommended).' });
+    }
+
+    if (cleanNewPin !== String(confirmPin).trim()) {
+      return res.status(400).json({ success: false, message: 'New PIN and confirm PIN do not match.' });
+    }
+
+    const adminAccess = await AdminAccess.findOne({ userRef: userId });
+    if (!adminAccess || adminAccess.status !== 'Active') {
+      return res.status(403).json({ success: false, message: 'No active administrative access record found.' });
+    }
+
+    const isCurrentValid = await bcrypt.compare(String(currentPin).trim(), adminAccess.pinHash);
+    if (!isCurrentValid) {
+      return res.status(400).json({ success: false, message: 'Current Admin PIN is incorrect.' });
+    }
+
+    adminAccess.pinHash = await bcrypt.hash(cleanNewPin, 10);
+    await adminAccess.save();
+
+    await AdminAuditLog.create({
+      operatorRef: userId,
+      operatorEmail: req.user.email,
+      targetUserRef: userId,
+      targetEmail: req.user.email,
+      action: 'ADMIN_PIN_CHANGED',
+      details: 'Administrator updated their own PIN',
+      ipAddress: req.ip || '',
+      userAgent: req.headers['user-agent'] || ''
+    });
+
+    return res.json({
+      success: true,
+      message: '✓ Admin PIN updated successfully.'
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to change Admin PIN: ' + err.message });
+  }
+};
+
 // LOGOUT HANDLER
 exports.logout = async (req, res) => {
   return res.json({ success: true, message: 'Logged out successfully.' });
-};
-
-// SEED ADMIN HANDLER
-exports.seedAdmin = async (req, res) => {
-  try {
-    const existing = await User.findOne({ email: 'admin@gfgcampus.org' });
-    if (existing) {
-      return res.json({ message: 'Super admin already exists', email: existing.email });
-    }
-
-    const hashedPassword = await bcrypt.hash('admin123', 10);
-
-    const adminMember = await Member.create({
-      name: 'Super Admin',
-      email: 'admin@gfgcampus.org',
-      role: 'Campus Mantri',
-      teamName: 'Executive Chapter',
-      accountType: 'Member',
-      membershipStatus: 'active',
-      membershipId: 'GFG-JH-2026-001',
-      session: '2026–27',
-      photo: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80'
-    });
-
-    const admin = await User.create({
-      username: 'Super Admin',
-      email: 'admin@gfgcampus.org',
-      password: hashedPassword,
-      role: 'Super Admin',
-      memberRef: adminMember._id
-    });
-
-    return res.json({ message: 'Admin seeded successfully', user: { email: admin.email } });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
 };

@@ -5,10 +5,8 @@ require('dotenv').config();
 
 const connectDB = require('./config/db');
 
-// Route Imports
-const authRoutes = require('./routes/authRoutes');
+// Import routes
 const homepageRoutes = require('./routes/homepageRoutes');
-const memberRoutes = require('./routes/memberRoutes');
 const facultyRoutes = require('./routes/facultyRoutes');
 const mantriRoutes = require('./routes/mantriRoutes');
 const teamRoutes = require('./routes/teamRoutes');
@@ -16,33 +14,34 @@ const eventRoutes = require('./routes/eventRoutes');
 const galleryRoutes = require('./routes/galleryRoutes');
 const resourceRoutes = require('./routes/resourceRoutes');
 const announcementRoutes = require('./routes/announcementRoutes');
+const memberRoutes = require('./routes/memberRoutes');
 const formRoutes = require('./routes/formRoutes');
+const authRoutes = require('./routes/authRoutes');
+const analyticsRoutes = require('./routes/analyticsRoutes');
 const mediaRoutes = require('./routes/mediaRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
-const analyticsRoutes = require('./routes/analyticsRoutes');
 const postRoutes = require('./routes/postRoutes');
 const leaderboardRoutes = require('./routes/leaderboardRoutes');
 const reportRoutes = require('./routes/reportRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve local media uploads fallback
+// Serve static uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Healthcheck
+// Health Check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'GeeksforGeeks CMP Backend Engine operational', timestamp: new Date() });
+  res.json({ status: 'ok', timestamp: new Date(), message: 'GFG Campus Body API is active' });
 });
 
-// Mounting Modular REST APIs
-app.use('/api/auth', authRoutes);
+// API Routes
 app.use('/api/homepage', homepageRoutes);
-app.use('/api/members', memberRoutes);
 app.use('/api/faculty', facultyRoutes);
 app.use('/api/mantri', mantriRoutes);
 app.use('/api/teams', teamRoutes);
@@ -50,22 +49,20 @@ app.use('/api/events', eventRoutes);
 app.use('/api/gallery', galleryRoutes);
 app.use('/api/resources', resourceRoutes);
 app.use('/api/announcements', announcementRoutes);
+app.use('/api/members', memberRoutes);
 app.use('/api/forms', formRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/analytics', analyticsRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/settings', settingsRoutes);
-app.use('/api/analytics', analyticsRoutes);
 app.use('/api/posts', postRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/reports', reportRoutes);
-
-// Global 404 Handler
-app.use((req, res, next) => {
-  res.status(404).json({ success: false, message: `Endpoint not found: ${req.method} ${req.originalUrl}` });
-});
+app.use('/api/admin', adminRoutes);
 
 // Global Error Handler
 app.use((err, req, res, next) => {
-  console.error('[Server Unhandled Error]:', err);
+  console.error('[Global Error Handler]:', err.stack);
   res.status(err.status || 500).json({
     success: false,
     message: err.message || 'Internal Server Error',
@@ -73,18 +70,29 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5001;
+const PORT = parseInt(process.env.PORT || '5001', 10);
+
+const startServer = (portToTry) => {
+  const server = app.listen(portToTry, () => {
+    console.log(`====================================================`);
+    console.log(`🚀 GFG CMP Server running on http://localhost:${portToTry}`);
+    console.log(`🌐 Public Homepage API: http://localhost:${portToTry}/api/homepage`);
+    console.log(`💬 Community Feed API: http://localhost:${portToTry}/api/posts`);
+    console.log(`🔐 Admin Auth API: http://localhost:${portToTry}/api/auth/login`);
+    console.log(`====================================================`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`[Server] Port ${portToTry} is in use. Retrying on port ${portToTry + 1}...`);
+      startServer(portToTry + 1);
+    } else {
+      console.error('[Server Error]:', err);
+    }
+  });
+};
 
 // Connect DB and launch server
 connectDB().then(() => {
-  app.listen(PORT, () => {
-    console.log(`====================================================`);
-    console.log(`🚀 GFG CMP Server running on http://localhost:${PORT}`);
-    console.log(`🌐 Public Homepage API: http://localhost:${PORT}/api/homepage`);
-    console.log(`💬 Community Feed API: http://localhost:${PORT}/api/posts`);
-    console.log(`🔐 Admin Auth API: http://localhost:${PORT}/api/auth/login`);
-    console.log(`====================================================`);
-  });
+  startServer(PORT);
 });
-
-// reload nodemon

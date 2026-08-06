@@ -2,51 +2,86 @@ const mongoose = require('mongoose');
 const Member = require('../models/Member');
 const Event = require('../models/Event');
 const Resource = require('../models/Resource');
-const FormSubmission = require('../models/FormSubmission');
-const MediaAsset = require('../models/MediaAsset');
+const Gallery = require('../models/Gallery');
+const Report = require('../models/Report');
+const Announcement = require('../models/Announcement');
 
 exports.getStatsOverview = async (req, res) => {
-  const DEFAULT_STATS = {
-    totalMembers: 185,
-    totalEvents: 24,
-    upcomingEvents: 3,
-    totalResources: 18,
-    totalFormSubmissions: 42,
-    totalMediaAssets: 56,
-    recentActivity: [
-      { type: 'member', text: 'New member registered', time: '10 mins ago' },
-      { type: 'event', text: 'GeeksHack 2026 registration opened', time: '1 hour ago' },
-      { type: 'resource', text: 'DSA Cheat Sheet PDF uploaded', time: '3 hours ago' }
-    ]
-  };
-
-  if (mongoose.connection.readyState !== 1) {
-    return res.json({ success: true, data: DEFAULT_STATS });
-  }
-
   try {
     const communityId = 'gfg-jamia-hamdard';
 
-    const totalMembers = await Member.countDocuments({ communityId });
+    const totalAccounts = await Member.countDocuments({ communityId });
+    const visitors = await Member.countDocuments({
+      communityId,
+      $or: [
+        { accountType: { $regex: /^visitor$/i } },
+        { role: { $regex: /^visitor$/i } }
+      ]
+    });
+    const verifiedMembers = await Member.countDocuments({
+      communityId,
+      accountType: { $regex: /^member$/i }
+    });
+    const pending = await Member.countDocuments({
+      communityId,
+      membershipStatus: { $regex: /^pending$/i }
+    });
+
     const totalEvents = await Event.countDocuments({ communityId });
-    const upcomingEvents = await Event.countDocuments({ communityId, status: { $in: ['Published', 'Registration Open', 'Live'] } });
+    const upcomingEvents = await Event.countDocuments({
+      communityId,
+      status: { $in: ['Published', 'Registration Open', 'Live'] }
+    });
+    const completedEvents = await Event.countDocuments({
+      communityId,
+      status: 'Completed'
+    });
+
+    const totalGallery = await Gallery.countDocuments({ communityId });
     const totalResources = await Resource.countDocuments({ communityId });
-    const totalFormSubmissions = await FormSubmission.countDocuments({ communityId });
-    const totalMediaAssets = await MediaAsset.countDocuments({ communityId });
+    const publishedResources = await Resource.countDocuments({ communityId, status: 'Published' });
+
+    const reportedItems = await Report.countDocuments({ communityId, moderationStatus: { $in: ['flagged', 'under_review'] } });
+    const underReviewItems = await Report.countDocuments({ communityId, moderationStatus: 'under_review' });
+
+    const totalAnnouncements = await Announcement.countDocuments({ communityId, status: 'Active' });
 
     return res.json({
       success: true,
       data: {
-        totalMembers: totalMembers || 185,
-        totalEvents: totalEvents || 24,
-        upcomingEvents: upcomingEvents || 3,
-        totalResources: totalResources || 18,
-        totalFormSubmissions: totalFormSubmissions || 42,
-        totalMediaAssets: totalMediaAssets || 56,
-        recentActivity: DEFAULT_STATS.recentActivity
+        members: {
+          totalAccounts,
+          visitors,
+          verifiedMembers,
+          pending
+        },
+        events: {
+          total: totalEvents,
+          upcoming: upcomingEvents,
+          completed: completedEvents
+        },
+        gallery: {
+          photos: totalGallery
+        },
+        resources: {
+          total: totalResources,
+          published: publishedResources
+        },
+        moderation: {
+          reported: reportedItems,
+          underReview: underReviewItems
+        },
+        announcements: {
+          published: totalAnnouncements
+        }
       }
     });
   } catch (err) {
-    return res.json({ success: true, data: DEFAULT_STATS });
+    console.error('[Analytics Error]:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to compute live dashboard statistics',
+      error: err.message
+    });
   }
 };

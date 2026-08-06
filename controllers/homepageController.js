@@ -16,7 +16,7 @@ const MOCK_HOMEPAGE = {
     heroSubheading: 'Master Data Structures, Full-Stack Web Dev, Artificial Intelligence & Competitive Programming with Jamia Hamdard’s official GFG Campus Body.',
     ctaText: 'Explore Upcoming Events',
     ctaLink: '#events',
-    contactEmail: 'gfg.chapter@jamiahamdard.ac.in',
+    contactEmail: 'gfgstudentbody.jh@gmail.com',
     socialLinks: {
       github: 'https://github.com',
       linkedin: 'https://linkedin.com',

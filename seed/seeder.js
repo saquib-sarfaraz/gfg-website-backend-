@@ -35,16 +35,38 @@ const seedData = async () => {
     await Form.deleteMany({});
     await SiteSettings.deleteMany({});
 
-    // 1. Super Admin User
-    const hashedPassword = await bcrypt.hash('admin123', 10);
-    const admin = await User.create({
-      username: 'Super Admin',
-      email: 'admin@gfgcampus.org',
-      password: hashedPassword,
-      role: 'Super Admin',
-      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80'
-    });
-    console.log('✓ Admin user seeded');
+    // 1. Root Super Admin User & AdminAccess
+    const AdminAccess = require('../models/AdminAccess');
+    await AdminAccess.deleteMany({});
+
+    const rootEmail = (process.env.ROOT_ADMIN_EMAIL || 'admin@gfgcampus.org').trim().toLowerCase();
+    const rootPassword = process.env.ROOT_ADMIN_PASSWORD;
+    const rootPin = process.env.ROOT_ADMIN_PIN;
+
+    if (rootPassword && rootPin) {
+      const hashedPassword = await bcrypt.hash(rootPassword, 10);
+      const hashedPin = await bcrypt.hash(String(rootPin), 10);
+
+      const adminUser = await User.create({
+        username: 'Root Super Admin',
+        email: rootEmail,
+        password: hashedPassword,
+        role: 'Super Admin',
+        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80'
+      });
+
+      await AdminAccess.create({
+        userRef: adminUser._id,
+        adminRole: 'ROOT_SUPER_ADMIN',
+        permissions: ['manage_members', 'manage_events', 'manage_gallery', 'manage_resources', 'manage_admins', 'system_settings'],
+        pinHash: hashedPin,
+        status: 'Active',
+        createdBy: adminUser._id
+      });
+      console.log('✓ Root Admin user & AdminAccess seeded from environment variables');
+    } else {
+      console.log('⚠ Skipping Root Admin seeding: ROOT_ADMIN_PASSWORD and ROOT_ADMIN_PIN must be set in .env');
+    }
 
     // 2. Site Settings
     await SiteSettings.create({
@@ -55,7 +77,7 @@ const seedData = async () => {
       heroSubheading: 'Master Data Structures, Full-Stack Web Dev, Artificial Intelligence & Competitive Programming with Jamia Hamdard’s official GFG Campus Body.',
       ctaText: 'Explore Upcoming Events',
       ctaLink: '#events',
-      contactEmail: 'gfg.chapter@jamiahamdard.ac.in'
+      contactEmail: 'gfgstudentbody.jh@gmail.com'
     });
     console.log('✓ Site settings seeded');
 
