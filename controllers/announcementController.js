@@ -40,66 +40,134 @@ const MOCK_ANNOUNCEMENTS = [
   }
 ];
 
+// Helper: Finds announcement by ObjectId or mock ID, creating a MongoDB document if updating mock data
+const findAnnouncementByIdOrMock = async (id) => {
+  if (mongoose.connection.readyState === 1 && mongoose.Types.ObjectId.isValid(id)) {
+    const doc = await Announcement.findById(id);
+    if (doc) return doc;
+  }
+
+  const mock = MOCK_ANNOUNCEMENTS.find(a => a._id === id);
+  if (mock && mongoose.connection.readyState === 1) {
+    try {
+      const created = await Announcement.create({
+        title: mock.title,
+        description: mock.description,
+        type: mock.type || 'Announcement',
+        priority: mock.priority || 'Medium',
+        linkUrl: mock.linkUrl || '',
+        linkLabel: mock.linkLabel || 'Learn More',
+        isPinned: mock.isPinned || false,
+        status: mock.status || 'Published',
+        communityId: 'gfg-jamia-hamdard'
+      });
+      return created;
+    } catch (e) {
+      return mock;
+    }
+  }
+  return mock || null;
+};
+
 exports.getAnnouncements = async (req, res) => {
   if (mongoose.connection.readyState !== 1) {
     return res.json({ success: true, count: MOCK_ANNOUNCEMENTS.length, data: MOCK_ANNOUNCEMENTS });
   }
 
   try {
-    const { status } = req.query;
+    const { status, scope } = req.query;
     const filter = { communityId: 'gfg-jamia-hamdard' };
-    if (status && status !== 'All') filter.status = status;
+
+    if (scope !== 'admin') {
+      if (status && status !== 'All') {
+        filter.status = status;
+      } else {
+        filter.status = { $in: ['Published', 'Active'] };
+      }
+
+      // Hide expired announcements for public non-admin requests
+      filter.$or = [
+        { expiryDate: { $exists: false } },
+        { expiryDate: null },
+        { expiryDate: { $gt: new Date() } }
+      ];
+    } else if (status && status !== 'All') {
+      filter.status = status;
+    }
 
     const list = await Announcement.find(filter).sort({ isPinned: -1, createdAt: -1 });
-    return res.json({ success: true, count: list.length, data: list.length > 0 ? list : MOCK_ANNOUNCEMENTS });
+    const totalCount = await Announcement.countDocuments({ communityId: 'gfg-jamia-hamdard' });
+
+    // Only fallback to mock array if MongoDB has 0 records and request is non-admin
+    const dataToReturn = (totalCount === 0 && scope !== 'admin') ? MOCK_ANNOUNCEMENTS : list;
+
+    return res.json({ success: true, count: dataToReturn.length, data: dataToReturn });
   } catch (err) {
-    return res.json({ success: true, count: MOCK_ANNOUNCEMENTS.length, data: MOCK_ANNOUNCEMENTS });
+    console.error('[getAnnouncements Error]:', err);
+    return res.json({ success: true, count: 0, data: [] });
   }
 };
 
 exports.createAnnouncement = async (req, res) => {
-  if (mongoose.connection.readyState !== 1) {
-    const newDoc = { _id: `a_${Date.now()}`, ...req.body, status: req.body.status || 'Published' };
-    MOCK_ANNOUNCEMENTS.unshift(newDoc);
-    return res.status(201).json({ success: true, data: newDoc });
-  }
-
   try {
-    const announcement = await Announcement.create(req.body);
+    const payload = {
+      ...req.body,
+      communityId: 'gfg-jamia-hamdard',
+      status: req.body.status || 'Published'
+    };
+
+    // Strip empty or non-ObjectId _id sent from frontend forms
+    if (!payload._id || !mongoose.Types.ObjectId.isValid(payload._id)) {
+      delete payload._id;
+    }
+
+    if (mongoose.connection.readyState !== 1) {
+      const newDoc = { _id: `a_${Date.now()}`, ...payload };
+      MOCK_ANNOUNCEMENTS.unshift(newDoc);
+      return res.status(201).json({ success: true, data: newDoc });
+    }
+
+    const announcement = await Announcement.create(payload);
     return res.status(201).json({ success: true, data: announcement });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err.message });
+    console.error('[CreateAnnouncement Error]:', err);
+    return res.status(400).json({ success: false, error: err.message, message: err.message });
   }
 };
 
 exports.updateAnnouncement = async (req, res) => {
-  if (mongoose.connection.readyState !== 1) {
-    const idx = MOCK_ANNOUNCEMENTS.findIndex(a => a._id === req.params.id);
-    if (idx !== -1) {
-      MOCK_ANNOUNCEMENTS[idx] = { ...MOCK_ANNOUNCEMENTS[idx], ...req.body };
-      return res.json({ success: true, data: MOCK_ANNOUNCEMENTS[idx] });
-    }
-    return res.status(404).json({ success: false, message: 'Announcement not found' });
-  }
-
+  const { id } = req.params;
   try {
-    const announcement = await Announcement.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const payload = { ...req.body };
+    delete payload._id;
+
+    let announcement = await findAnnouncementByIdOrMock(id);
     if (!announcement) return res.status(404).json({ success: false, message: 'Announcement not found' });
-    return res.json({ success: true, data: announcement });
+
+    if (typeof announcement.save === 'function') {
+      Object.assign(announcement, payload);
+      await announcement.save();
+      return res.json({ success: true, data: announcement });
+    } else {
+      const idx = MOCK_ANNOUNCEMENTS.findIndex(a => a._id === id);
+      if (idx !== -1) MOCK_ANNOUNCEMENTS[idx] = { ...MOCK_ANNOUNCEMENTS[idx], ...payload };
+      return res.json({ success: true, data: { ...announcement, ...payload } });
+    }
   } catch (err) {
-    return res.status(400).json({ success: false, error: err.message });
+    console.error('[UpdateAnnouncement Error]:', err);
+    return res.status(400).json({ success: false, error: err.message, message: err.message });
   }
 };
 
 exports.deleteAnnouncement = async (req, res) => {
-  if (mongoose.connection.readyState !== 1) {
-    const idx = MOCK_ANNOUNCEMENTS.findIndex(a => a._id === req.params.id);
-    if (idx !== -1) MOCK_ANNOUNCEMENTS.splice(idx, 1);
-    return res.json({ success: true, message: 'Announcement deleted' });
-  }
-
+  const { id } = req.params;
   try {
-    await Announcement.findByIdAndDelete(req.params.id);
+    if (mongoose.connection.readyState === 1 && mongoose.Types.ObjectId.isValid(id)) {
+      await Announcement.findByIdAndDelete(id);
+    }
+    const idx = MOCK_ANNOUNCEMENTS.findIndex(a => a._id === id);
+    if (idx !== -1) MOCK_ANNOUNCEMENTS.splice(idx, 1);
+
     return res.json({ success: true, message: 'Announcement deleted' });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -108,21 +176,18 @@ exports.deleteAnnouncement = async (req, res) => {
 
 exports.togglePinAnnouncement = async (req, res) => {
   const { id } = req.params;
-  if (mongoose.connection.readyState !== 1) {
-    const item = MOCK_ANNOUNCEMENTS.find(a => a._id === id);
-    if (item) {
+  try {
+    let item = await findAnnouncementByIdOrMock(id);
+    if (!item) return res.status(404).json({ success: false, message: 'Announcement not found' });
+
+    if (typeof item.save === 'function') {
+      item.isPinned = !item.isPinned;
+      await item.save();
+      return res.json({ success: true, data: item });
+    } else {
       item.isPinned = !item.isPinned;
       return res.json({ success: true, data: item });
     }
-    return res.status(404).json({ success: false, message: 'Announcement not found' });
-  }
-
-  try {
-    const item = await Announcement.findById(id);
-    if (!item) return res.status(404).json({ success: false, message: 'Announcement not found' });
-    item.isPinned = !item.isPinned;
-    await item.save();
-    return res.json({ success: true, data: item });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }

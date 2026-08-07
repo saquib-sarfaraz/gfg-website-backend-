@@ -4,7 +4,7 @@ const eventSchema = new mongoose.Schema({
   communityId: { type: String, default: 'gfg-jamia-hamdard', index: true },
   legacyId: { type: String, unique: true, sparse: true }, // Links to GFG-CMP-Content legacy event
   source: { type: String, enum: ['legacy', 'admin', 'cloudinary'], default: 'admin' },
-  banner: { type: String, required: true },
+  banner: { type: String, default: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1200&q=80' },
   title: { type: String, required: true },
   description: { type: String, required: true },
   date: { type: mongoose.Schema.Types.Mixed, required: true }, // String for legacy dates, Date for new

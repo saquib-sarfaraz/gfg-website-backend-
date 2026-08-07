@@ -2,11 +2,12 @@ const express = require('express');
 const router = express.Router();
 const {
   getMembers, createMember, updateMember, deleteMember, importCSV,
-  getProfile, updateSelfProfile, verifyMember, updateMembership, updateMemberStatus
+  getProfile, updateSelfProfile, verifyMember, updateMembership, updateMemberStatus, getMyPosts
 } = require('../controllers/memberController');
 const { authMiddleware } = require('../middleware/auth');
 
 router.get('/', getMembers);
+router.get('/me/posts', authMiddleware, getMyPosts);
 router.get('/verify/:verificationId', verifyMember);
 router.get('/:id/profile', getProfile);
 router.patch('/:id/profile', updateSelfProfile);

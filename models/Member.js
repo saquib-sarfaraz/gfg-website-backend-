@@ -3,7 +3,9 @@ const mongoose = require('mongoose');
 const memberSchema = new mongoose.Schema({
   communityId: { type: String, default: 'gfg-jamia-hamdard', index: true },
   photo: { type: String, default: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80' },
+  photoPublicId: { type: String, default: '' },
   coverPhoto: { type: String, default: '' },
+  coverPhotoPublicId: { type: String, default: '' },
   name: { type: String, required: true },
   email: { type: String, required: true },
   phone: { type: String, default: '' },

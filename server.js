@@ -70,10 +70,16 @@ app.use((err, req, res, next) => {
   });
 });
 
+const http = require('http');
+const { initSocket } = require('./config/socket');
+
 const PORT = parseInt(process.env.PORT || '5001', 10);
 
 const startServer = (portToTry) => {
-  const server = app.listen(portToTry, () => {
+  const httpServer = http.createServer(app);
+  initSocket(httpServer);
+
+  httpServer.listen(portToTry, () => {
     console.log(`====================================================`);
     console.log(`🚀 GFG CMP Server running on http://localhost:${portToTry}`);
     console.log(`🌐 Public Homepage API: http://localhost:${portToTry}/api/homepage`);
@@ -82,7 +88,7 @@ const startServer = (portToTry) => {
     console.log(`====================================================`);
   });
 
-  server.on('error', (err) => {
+  httpServer.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
       console.warn(`[Server] Port ${portToTry} is in use. Retrying on port ${portToTry + 1}...`);
       startServer(portToTry + 1);

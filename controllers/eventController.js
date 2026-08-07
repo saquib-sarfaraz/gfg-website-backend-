@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 const Event = require('../models/Event');
+const AuditLog = require('../models/AuditLog');
+const { deleteAsset } = require('../services/cloudinaryService');
 
 // ============================================================
 // LEGACY GFG-CMP EVENTS (AUTHORITATIVE APPROVED CONTENT)
@@ -268,25 +270,53 @@ exports.getEvents = async (req, res) => {
   }
 };
 
+// Helper: Resolves event by ObjectId, legacyId, or creates MongoDB document from legacy hardcoded data if needed
+const findEventByIdOrLegacy = async (id) => {
+  if (mongoose.connection.readyState === 1) {
+    let event = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      event = await Event.findById(id);
+    }
+    if (!event) {
+      event = await Event.findOne({ legacyId: id });
+    }
+    if (event) return event;
+  }
+
+  // Check legacy fallback array
+  const legacy = LEGACY_EVENTS.find(e => e._id === id || e.legacyId === id);
+  if (legacy) {
+    if (mongoose.connection.readyState === 1) {
+      try {
+        const created = await Event.create({
+          title: legacy.title,
+          description: legacy.description || legacy.title,
+          date: legacy.date,
+          venue: legacy.venue || 'Jamia Hamdard Campus',
+          banner: legacy.banner || legacy.image || '',
+          status: legacy.status || 'Completed',
+          isUpcoming: legacy.isUpcoming !== false,
+          category: legacy.category || 'Session',
+          communityId: 'gfg-jamia-hamdard',
+          legacyId: legacy._id,
+          source: 'legacy'
+        });
+        return created;
+      } catch (e) {
+        return legacy;
+      }
+    }
+    return legacy;
+  }
+  return null;
+};
+
 // GET single event by ID — checks DB first, then legacy
 exports.getEventById = async (req, res) => {
   try {
-    if (mongoose.connection.readyState === 1) {
-      let event;
-      if (mongoose.Types.ObjectId.isValid(req.params.id)) {
-        event = await Event.findById(req.params.id).populate('formId');
-      }
-      if (!event) {
-        event = await Event.findOne({ legacyId: req.params.id });
-      }
-      if (event) return res.json({ success: true, data: event });
-    }
-
-    // Check legacy events
-    const legacy = LEGACY_EVENTS.find(e => e._id === req.params.id || e.legacyId === req.params.id);
-    if (legacy) return res.json({ success: true, data: legacy });
-
-    return res.status(404).json({ success: false, message: 'Event not found' });
+    const event = await findEventByIdOrLegacy(req.params.id);
+    if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
+    return res.json({ success: true, data: event });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -299,32 +329,84 @@ exports.createEvent = async (req, res) => {
       ...req.body,
       communityId: 'gfg-jamia-hamdard',
       source: req.body.source || 'admin',
-      status: req.body.status || 'Registration Open'
+      status: req.body.status || 'Registration Open',
+      banner: req.body.banner || 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1200&q=80'
     };
+
+    // Strip empty or non-ObjectId _id sent from frontend forms
+    if (!eventData._id || !mongoose.Types.ObjectId.isValid(eventData._id)) {
+      delete eventData._id;
+    }
+
     const event = await Event.create(eventData);
     return res.status(201).json({ success: true, data: event });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err.message });
+    return res.status(400).json({ success: false, error: err.message, message: err.message });
   }
 };
 
 // UPDATE event
 exports.updateEvent = async (req, res) => {
+  const { id } = req.params;
   try {
-    const event = await Event.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    let event = await findEventByIdOrLegacy(id);
     if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
-    return res.json({ success: true, data: event });
+
+    const updateData = { ...req.body };
+    delete updateData._id;
+
+    if (typeof event.save === 'function') {
+      Object.assign(event, updateData);
+      await event.save();
+      return res.json({ success: true, data: event });
+    } else {
+      return res.json({ success: true, data: { ...event, ...updateData } });
+    }
   } catch (err) {
+    console.error('[UpdateEvent Error]:', err);
     return res.status(400).json({ success: false, error: err.message });
   }
 };
 
 // DELETE event
 exports.deleteEvent = async (req, res) => {
+  const { id } = req.params;
+
+  // Protect legacy hardcoded events
+  const isLegacyId = id.startsWith('evt_up_') || id.startsWith('evt_past_');
+  if (isLegacyId) {
+    return res.status(403).json({ success: false, message: 'Legacy historical events are protected and cannot be deleted.' });
+  }
+
   try {
-    await Event.findByIdAndDelete(req.params.id);
-    return res.json({ success: true, message: 'Event deleted' });
+    const event = await Event.findById(id);
+    if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
+
+    const publicId = event.bannerPublicId || event.publicId;
+
+    // 1. Delete MongoDB record first (Source of Truth)
+    await Event.findByIdAndDelete(id);
+
+    // 2. Non-blocking Cloudinary cleanup if explicit publicId present
+    if (publicId && !publicId.startsWith('local_')) {
+      deleteAsset(publicId, 'image').catch(err => console.error('[EventDelete] Cloudinary cleanup error:', err));
+    }
+
+    // 3. Audit Log
+    if (req.user) {
+      AuditLog.create({
+        operatorRef: req.user._id,
+        operatorRole: req.user.role || 'Admin',
+        action: 'EVENT_PERMANENT_DELETE',
+        targetType: 'event',
+        targetId: id,
+        targetTitle: event.title || 'Untitled Event'
+      }).catch(err => console.error('[AuditLog Error]:', err));
+    }
+
+    return res.json({ success: true, deletedEventId: id, message: 'Event permanently deleted.' });
   } catch (err) {
+    console.error('[DeleteEvent Error]:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -333,13 +415,19 @@ exports.deleteEvent = async (req, res) => {
 exports.markEventCompleted = async (req, res) => {
   const { id } = req.params;
   try {
-    const event = await Event.findById(id);
+    let event = await findEventByIdOrLegacy(id);
     if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
-    event.status = 'Completed';
-    event.isUpcoming = false;
-    await event.save();
-    return res.json({ success: true, data: event });
+
+    if (typeof event.save === 'function') {
+      event.status = 'Completed';
+      event.isUpcoming = false;
+      await event.save();
+      return res.json({ success: true, data: event });
+    } else {
+      return res.json({ success: true, data: { ...event, status: 'Completed', isUpcoming: false } });
+    }
   } catch (err) {
+    console.error('[MarkEventCompleted Error]:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 };

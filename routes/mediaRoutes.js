@@ -3,10 +3,10 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { uploadMedia, getMediaAssets, deleteMediaAsset } = require('../controllers/mediaController');
+const { uploadMedia, getMediaAssets, deleteMediaAsset, getMediaHealth } = require('../controllers/mediaController');
 const { authMiddleware } = require('../middleware/auth');
 
-// Multer temporary storage
+// Ensure tmp directory exists
 const tmpDir = path.join(__dirname, '..', 'uploads', 'tmp');
 if (!fs.existsSync(tmpDir)) {
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -20,9 +20,27 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 } // 20 MB
+});
 
-router.post('/upload', authMiddleware, upload.single('mediaFile'), uploadMedia);
+// Accept both 'mediaFile' (Community Feed) and 'file' (Profile upload) field names
+const uploadFields = upload.fields([
+  { name: 'mediaFile', maxCount: 1 },
+  { name: 'file', maxCount: 1 }
+]);
+
+// Normalize: whichever field was provided, expose it as req.file
+const normalizeFileField = (req, res, next) => {
+  if (req.files) {
+    req.file = req.files['mediaFile']?.[0] || req.files['file']?.[0] || null;
+  }
+  next();
+};
+
+router.get('/health', getMediaHealth);
+router.post('/upload', authMiddleware, uploadFields, normalizeFileField, uploadMedia);
 router.get('/', getMediaAssets);
 router.delete('/:id', authMiddleware, deleteMediaAsset);
 

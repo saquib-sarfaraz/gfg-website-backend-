@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 const Gallery = require('../models/Gallery');
+const AuditLog = require('../models/AuditLog');
+const { deleteAsset } = require('../services/cloudinaryService');
 
 // ============================================================
 // LEGACY GFG-CMP GALLERY (AUTHORITATIVE APPROVED CONTENT)
@@ -155,17 +157,44 @@ exports.updateGalleryItem = async (req, res) => {
   }
 };
 
-// DELETE gallery item (safe: does not attempt Cloudinary destroy for legacy source)
+// DELETE gallery item (permanent delete for dynamic gallery assets)
 exports.deleteGalleryItem = async (req, res) => {
+  const { id } = req.params;
+
+  // Protect legacy items
+  if (id.startsWith('gal_')) {
+    return res.status(403).json({ success: false, message: 'Legacy historical gallery items are protected.' });
+  }
+
   try {
-    const item = await Gallery.findById(req.params.id);
+    const item = await Gallery.findById(id);
     if (!item) return res.status(404).json({ success: false, message: 'Gallery item not found' });
 
-    // Only attempt Cloudinary cleanup for cloudinary-sourced items
-    // Legacy items just get removed from MongoDB metadata
-    await Gallery.findByIdAndDelete(req.params.id);
-    return res.json({ success: true, message: 'Gallery item deleted' });
+    const publicId = item.publicId;
+
+    // 1. Delete MongoDB record first (Source of Truth)
+    await Gallery.findByIdAndDelete(id);
+
+    // 2. Non-blocking Cloudinary cleanup if explicit publicId present
+    if (publicId && !publicId.startsWith('local_')) {
+      deleteAsset(publicId, 'image').catch(err => console.error('[GalleryDelete] Cloudinary cleanup error:', err));
+    }
+
+    // 3. Audit Log
+    if (req.user) {
+      AuditLog.create({
+        operatorRef: req.user._id,
+        operatorRole: req.user.role || 'Admin',
+        action: 'GALLERY_MEDIA_DELETE',
+        targetType: 'gallery',
+        targetId: id,
+        targetTitle: item.title || 'Untitled Photo'
+      }).catch(err => console.error('[AuditLog Error]:', err));
+    }
+
+    return res.json({ success: true, deletedGalleryId: id, message: 'Gallery item permanently deleted.' });
   } catch (err) {
+    console.error('[DeleteGalleryItem Error]:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 };

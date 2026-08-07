@@ -4,6 +4,10 @@ const Comment = require('../models/Comment');
 const Bookmark = require('../models/Bookmark');
 const Like = require('../models/Like');
 const Member = require('../models/Member');
+const Report = require('../models/Report');
+const AuditLog = require('../models/AuditLog');
+const { notifyPostUpdated, getIO } = require('../config/socket');
+const { deleteAssets } = require('../services/cloudinaryService');
 
 const MOCK_POSTS = [
   {
@@ -126,7 +130,6 @@ const MOCK_POSTS = [
 const MOCK_LIKES = new Set();
 const MOCK_BOOKMARKS = new Set();
 
-// Helper to get active member reference
 const getOrCreateDefaultMember = async () => {
   let member = await Member.findOne({ status: 'Active' });
   if (!member) {
@@ -139,6 +142,21 @@ const getOrCreateDefaultMember = async () => {
     });
   }
   return member._id;
+};
+
+const resolveMemberFromReq = async (req) => {
+  const inputId = req.body?.memberId || req.query?.memberId || req.body?.authorRef;
+  if (inputId && mongoose.Types.ObjectId.isValid(inputId)) {
+    return inputId;
+  }
+  if (req.user) {
+    let member = await Member.findOne({ userRef: req.user._id });
+    if (!member && req.user.email) {
+      member = await Member.findOne({ email: req.user.email });
+    }
+    if (member) return member._id.toString();
+  }
+  return await getOrCreateDefaultMember();
 };
 
 exports.getPosts = async (req, res) => {
@@ -170,7 +188,9 @@ exports.getPosts = async (req, res) => {
   }
 
   try {
-    const { type, tag, search, pinnedOnly, filter: navFilter, memberId } = req.query;
+    const { type, tag, search, pinnedOnly, filter: navFilter, memberId: inputMemberId } = req.query;
+    const memberId = inputMemberId && mongoose.Types.ObjectId.isValid(inputMemberId) ? inputMemberId : await resolveMemberFromReq(req);
+
     const filterQuery = {
       communityId: 'gfg-jamia-hamdard',
       status: 'Active',
@@ -188,11 +208,12 @@ exports.getPosts = async (req, res) => {
     }
 
     // Filter by Saved / My Posts
-    if (navFilter === 'Saved' && memberId && mongoose.Types.ObjectId.isValid(memberId)) {
+    const lowerNav = navFilter ? navFilter.toLowerCase() : '';
+    if (lowerNav === 'saved' && memberId && mongoose.Types.ObjectId.isValid(memberId)) {
       const userBookmarks = await Bookmark.find({ memberRef: memberId }).select('postRef');
       const savedPostIds = userBookmarks.map(b => b.postRef);
       filterQuery._id = { $in: savedPostIds };
-    } else if (navFilter === 'My Posts' && memberId && mongoose.Types.ObjectId.isValid(memberId)) {
+    } else if ((lowerNav === 'my posts' || lowerNav === 'my_posts') && memberId && mongoose.Types.ObjectId.isValid(memberId)) {
       filterQuery.authorRef = memberId;
     }
 
@@ -302,9 +323,7 @@ exports.createPost = async (req, res) => {
   }
 
   try {
-    if (!authorRef || !mongoose.Types.ObjectId.isValid(authorRef)) {
-      authorRef = await getOrCreateDefaultMember();
-    }
+    const authorRef = await resolveMemberFromReq(req);
 
     const post = await Post.create({
       communityId: 'gfg-jamia-hamdard',
@@ -343,9 +362,7 @@ exports.toggleLike = async (req, res) => {
   }
 
   try {
-    if (!memberId || !mongoose.Types.ObjectId.isValid(memberId)) {
-      memberId = await getOrCreateDefaultMember();
-    }
+    const memberId = await resolveMemberFromReq(req);
 
     const post = await Post.findById(id);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
@@ -356,11 +373,13 @@ exports.toggleLike = async (req, res) => {
       await Like.findByIdAndDelete(existingLike._id);
       post.likesCount = Math.max(0, post.likesCount - 1);
       await post.save();
+      notifyPostUpdated(id, { likesCount: post.likesCount });
       return res.json({ success: true, likesCount: post.likesCount, isLiked: false });
     } else {
       await Like.create({ communityId: 'gfg-jamia-hamdard', memberRef: memberId, postRef: id });
       post.likesCount += 1;
       await post.save();
+      notifyPostUpdated(id, { likesCount: post.likesCount });
       return res.json({ success: true, likesCount: post.likesCount, isLiked: true });
     }
   } catch (err) {
@@ -371,7 +390,6 @@ exports.toggleLike = async (req, res) => {
 
 exports.toggleBookmark = async (req, res) => {
   const { id } = req.params;
-  let { memberId } = req.body;
 
   if (mongoose.connection.readyState !== 1) {
     const target = MOCK_POSTS.find(p => p._id === id);
@@ -387,9 +405,7 @@ exports.toggleBookmark = async (req, res) => {
   }
 
   try {
-    if (!memberId || !mongoose.Types.ObjectId.isValid(memberId)) {
-      memberId = await getOrCreateDefaultMember();
-    }
+    const memberId = await resolveMemberFromReq(req);
 
     const post = await Post.findById(id);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
@@ -400,11 +416,13 @@ exports.toggleBookmark = async (req, res) => {
       await Bookmark.findByIdAndDelete(existingBookmark._id);
       post.bookmarksCount = Math.max(0, post.bookmarksCount - 1);
       await post.save();
+      notifyPostUpdated(id, { bookmarksCount: post.bookmarksCount });
       return res.json({ success: true, bookmarksCount: post.bookmarksCount, isBookmarked: false });
     } else {
       await Bookmark.create({ communityId: 'gfg-jamia-hamdard', memberRef: memberId, postRef: id });
       post.bookmarksCount += 1;
       await post.save();
+      notifyPostUpdated(id, { bookmarksCount: post.bookmarksCount });
       return res.json({ success: true, bookmarksCount: post.bookmarksCount, isBookmarked: true });
     }
   } catch (err) {
@@ -504,8 +522,12 @@ exports.addComment = async (req, res) => {
       parentCommentId: parentCommentId || null
     });
 
-    await Post.findByIdAndUpdate(id, { $inc: { commentsCount: 1 } });
+    const updatedPost = await Post.findByIdAndUpdate(id, { $inc: { commentsCount: 1 } }, { new: true });
     const populated = await Comment.findById(comment._id).populate('authorRef', 'name photo role teamName').lean();
+
+    if (updatedPost) {
+      notifyPostUpdated(id, { commentsCount: updatedPost.commentsCount });
+    }
 
     return res.status(201).json({ success: true, data: { ...populated, replies: [] } });
   } catch (err) {
@@ -516,7 +538,7 @@ exports.addComment = async (req, res) => {
 
 exports.deleteComment = async (req, res) => {
   const { commentId } = req.params;
-  const memberId = req.body?.memberId || req.query?.memberId || req.user?.memberId;
+  const memberId = await resolveMemberFromReq(req);
 
   try {
     const comment = await Comment.findById(commentId);
@@ -527,7 +549,7 @@ exports.deleteComment = async (req, res) => {
     // Check permission: Comment Author OR Post Owner OR Moderator Permission
     const isCommentAuthor = memberId && comment.authorRef.toString() === memberId.toString();
     const isPostAuthor = memberId && post && post.authorRef.toString() === memberId.toString();
-    const isModerator = req.user?.role === 'Super Admin' || (req.user?.permissions && req.user.permissions.includes('community:moderate'));
+    const isModerator = req.user?.role === 'Super Admin' || req.adminAccess || (req.user?.permissions && req.user.permissions.includes('community:moderate'));
 
     if (!isCommentAuthor && !isPostAuthor && !isModerator) {
       return res.status(403).json({ success: false, message: 'Unauthorized to delete this comment' });
@@ -549,7 +571,10 @@ exports.deleteComment = async (req, res) => {
       // Hard deletion for leaf comment
       await Comment.findByIdAndDelete(commentId);
       if (post) {
-        await Post.findByIdAndUpdate(comment.postId, { $inc: { commentsCount: -1 } });
+        const updatedPost = await Post.findByIdAndUpdate(comment.postId, { $inc: { commentsCount: -1 } }, { new: true });
+        if (updatedPost) {
+          notifyPostUpdated(comment.postId, { commentsCount: updatedPost.commentsCount });
+        }
       }
       return res.json({ success: true, message: 'Comment deleted successfully', softDeleted: false });
     }
@@ -560,27 +585,55 @@ exports.deleteComment = async (req, res) => {
 
 exports.deletePost = async (req, res) => {
   const { id } = req.params;
-  const memberId = req.body?.memberId || req.query?.memberId || req.user?.memberId;
 
   try {
+    const memberId = await resolveMemberFromReq(req);
     const post = await Post.findById(id);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
 
     // Check permission: Post Author OR Moderator Permission
-    const isPostAuthor = memberId && post.authorRef.toString() === memberId.toString();
-    const isModerator = req.user?.role === 'Super Admin' || (req.user?.permissions && req.user.permissions.includes('community:moderate'));
+    const isPostAuthor = memberId && String(post.authorRef) === String(memberId);
+    const isModerator = req.user?.role === 'Super Admin' || req.adminAccess || (req.user?.permissions && req.user.permissions.includes('community:moderate'));
 
     if (!isPostAuthor && !isModerator) {
       return res.status(403).json({ success: false, message: 'Unauthorized to delete this post' });
     }
 
+    // 1. Capture Cloudinary assets from post.media[] with explicit publicId
+    const assetsToDelete = (post.media || [])
+      .filter(m => m && m.publicId && !m.publicId.startsWith('local_'))
+      .map(m => ({ publicId: m.publicId, resourceType: m.resourceType || 'image' }));
+
+    // 2. Perform DB deletion (MongoDB is source of truth)
     await Post.findByIdAndDelete(id);
     await Comment.deleteMany({ postId: id });
     await Like.deleteMany({ postRef: id });
     await Bookmark.deleteMany({ postRef: id });
+    await Report.deleteMany({ targetRef: id });
 
-    return res.json({ success: true, message: 'Post and associated discussion deleted successfully' });
+    // 3. Non-blocking Cloudinary cleanup
+    if (assetsToDelete.length > 0) {
+      deleteAssets(assetsToDelete).catch(err => console.error('[PostDelete] Cloudinary cleanup async error:', err));
+    }
+
+    // 4. Audit Log
+    if (req.user) {
+      AuditLog.create({
+        operatorRef: req.user._id,
+        operatorRole: req.user.role || 'Member',
+        action: 'POST_PERMANENT_DELETE',
+        targetType: 'post',
+        targetId: id,
+        targetTitle: post.title || 'Untitled Post'
+      }).catch(err => console.error('[AuditLog Error]:', err));
+    }
+
+    // 5. Notify Socket.io
+    notifyPostUpdated(id, { isDeleted: true });
+
+    return res.json({ success: true, deletedPostId: id, message: 'Post permanently deleted.' });
   } catch (err) {
+    console.error('[DeletePost Error]:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 };

@@ -2,21 +2,44 @@ const mongoose = require('mongoose');
 const Report = require('../models/Report');
 const Post = require('../models/Post');
 const Comment = require('../models/Comment');
+const Member = require('../models/Member');
 
 const REPORT_REVIEW_THRESHOLD = parseInt(process.env.REPORT_REVIEW_THRESHOLD || '5', 10);
 const RATE_LIMIT_MAX_PER_HOUR = 10;
 
 // Submit a new content report
 exports.createReport = async (req, res) => {
-  const reporterRef = req.user?._id || req.body.reporterId;
-  const { targetType, targetId, reason, details } = req.body;
+  const { targetType, targetRef: inputTargetRef, targetId, reason, details } = req.body;
+  const targetRef = inputTargetRef || targetId;
+
+  if (!req.user) {
+    return res.status(401).json({ success: false, message: 'Please sign in to report content.' });
+  }
+
+  // Resolve Member document from authenticated identity (User -> Member)
+  let memberObj = null;
+  if (req.user._id) {
+    memberObj = await Member.findOne({ userRef: req.user._id });
+  }
+  if (!memberObj && req.user.email) {
+    memberObj = await Member.findOne({ email: req.user.email });
+  }
+  if (!memberObj && req.user._id) {
+    memberObj = await Member.findById(req.user._id);
+  }
+
+  const reporterRef = memberObj ? memberObj._id : (req.user._id || req.body.reporterId);
 
   if (!reporterRef) {
-    return res.status(401).json({ success: false, message: 'Authentication required to report community content' });
+    return res.status(401).json({ success: false, message: 'Please sign in to report content.' });
   }
 
   if (!['post', 'comment'].includes(targetType)) {
     return res.status(400).json({ success: false, message: 'Invalid report target type' });
+  }
+
+  if (!targetRef) {
+    return res.status(400).json({ success: false, message: 'Target reference is required' });
   }
 
   if (!reason) {
@@ -42,7 +65,7 @@ exports.createReport = async (req, res) => {
     if (recentReportCount >= RATE_LIMIT_MAX_PER_HOUR) {
       return res.status(429).json({
         success: false,
-        message: 'Report rate limit reached. Please wait before submitting more reports.'
+        message: 'Too many attempts. Please try again later.'
       });
     }
 
@@ -51,15 +74,15 @@ exports.createReport = async (req, res) => {
     let targetModelName = 'Post';
 
     if (targetType === 'post') {
-      targetObj = await Post.findById(targetId);
+      targetObj = await Post.findById(targetRef);
       targetModelName = 'Post';
     } else {
-      targetObj = await Comment.findById(targetId);
+      targetObj = await Comment.findById(targetRef);
       targetModelName = 'Comment';
     }
 
     if (!targetObj) {
-      return res.status(404).json({ success: false, message: 'Target content not found' });
+      return res.status(404).json({ success: false, message: 'Content no longer exists.' });
     }
 
     // 3. Reject reports if content is already hidden or removed
@@ -67,17 +90,27 @@ exports.createReport = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This content has already been moderated or removed.' });
     }
 
-    // 4. Prevent Self-Reporting Backend Safeguard
+    // 4. Prevent Self-Reporting Safeguard
     if (targetObj.authorRef && targetObj.authorRef.toString() === reporterRef.toString()) {
       return res.status(400).json({ success: false, message: 'You cannot report your own content.' });
     }
 
-    // 5. Create Report Document (Database Unique Compound Index enforces 1 report per target per member)
+    // Pre-check duplicate report for fast 409 response
+    const existingReport = await Report.findOne({ reporterRef, targetType, targetRef });
+    if (existingReport) {
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_REPORTED',
+        message: "You've already reported this content."
+      });
+    }
+
+    // 5. Create Report Document
     const newReport = new Report({
       communityId: 'gfg-jamia-hamdard',
       reporterRef,
       targetType,
-      targetRef: targetId,
+      targetRef,
       targetModel: targetModelName,
       targetAuthorRef: targetObj.authorRef,
       reason,
@@ -90,7 +123,7 @@ exports.createReport = async (req, res) => {
     // 6. Calculate Active/Pending Unique Reports
     const activePendingCount = await Report.countDocuments({
       targetType,
-      targetRef: targetId,
+      targetRef,
       status: { $in: ['pending', 'under_review'] }
     });
 
@@ -111,16 +144,18 @@ exports.createReport = async (req, res) => {
       data: {
         reportId: newReport._id,
         targetType,
-        targetId,
+        targetRef,
+        reportCount: activePendingCount,
         moderationStatus: targetObj.moderationStatus
       }
     });
 
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: 'You have already submitted a report for this item.'
+        code: 'ALREADY_REPORTED',
+        message: "You've already reported this content."
       });
     }
     return res.status(500).json({ success: false, error: error.message });

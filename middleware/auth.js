@@ -62,8 +62,28 @@ const requirePermission = (permissionName) => {
   };
 };
 
+const optionalAuthMiddleware = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, JWT_SECRET);
+      const user = await User.findById(decoded.id).select('-password');
+      if (user) {
+        req.user = user;
+        const adminAccess = await AdminAccess.findOne({ userRef: user._id });
+        req.adminAccess = (adminAccess && adminAccess.status === 'Active') ? adminAccess : null;
+      }
+    }
+  } catch (_) {
+    // Ignore invalid optional tokens
+  }
+  next();
+};
+
 module.exports = {
   authMiddleware,
+  optionalAuthMiddleware,
   adminOnly,
   requirePermission,
   JWT_SECRET

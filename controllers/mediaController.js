@@ -1,6 +1,27 @@
 const MediaAsset = require('../models/MediaAsset');
 const { uploadMediaAsset } = require('../config/cloudinary');
 
+/**
+ * POST /api/media/upload
+ *
+ * Accepts a multipart/form-data file (field: 'mediaFile' OR 'file') and
+ * uploads it to Cloudinary (production) or local storage (development fallback).
+ *
+ * Normalized success response:
+ * {
+ *   success: true,
+ *   media: {
+ *     url, publicId, resourceType, format, width, height, bytes
+ *   },
+ *   data: { url, publicId, ... }    ← backward-compat alias
+ * }
+ *
+ * Error response:
+ * {
+ *   success: false,
+ *   message: '...'
+ * }
+ */
 exports.uploadMedia = async (req, res) => {
   try {
     if (!req.file) {
@@ -8,8 +29,19 @@ exports.uploadMedia = async (req, res) => {
     }
 
     const folder = req.body.folder || 'General';
-    const uploadResult = await uploadMediaAsset(req.file.path, folder);
 
+    let uploadResult;
+    try {
+      uploadResult = await uploadMediaAsset(req.file.path, folder);
+    } catch (uploadErr) {
+      // Cloudinary failed in production — do not persist anything
+      return res.status(502).json({
+        success: false,
+        message: uploadErr.message || 'Media upload failed. Please try again.'
+      });
+    }
+
+    // Persist asset record to MediaAsset collection for Media Library
     const asset = await MediaAsset.create({
       communityId: 'gfg-jamia-hamdard',
       url: uploadResult.url,
@@ -20,8 +52,24 @@ exports.uploadMedia = async (req, res) => {
       mimeType: req.file.mimetype
     });
 
-    return res.status(201).json({ success: true, data: asset });
+    // Normalized payload — expose both `media` (canonical) and `data` (backward compat)
+    const mediaPayload = {
+      url: uploadResult.url,
+      publicId: uploadResult.publicId,
+      resourceType: uploadResult.resourceType || 'image',
+      format: uploadResult.format || '',
+      width: uploadResult.width || null,
+      height: uploadResult.height || null,
+      bytes: uploadResult.bytes || 0
+    };
+
+    return res.status(201).json({
+      success: true,
+      media: mediaPayload,
+      data: { ...asset.toObject(), ...mediaPayload }
+    });
   } catch (err) {
+    console.error('[MediaController] uploadMedia error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -48,4 +96,17 @@ exports.deleteMediaAsset = async (req, res) => {
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
+};
+
+const { isCloudinaryConfigured } = require('../config/cloudinary');
+
+exports.getMediaHealth = async (req, res) => {
+  const configured = isCloudinaryConfigured();
+  return res.json({
+    success: true,
+    configured,
+    provider: 'cloudinary',
+    status: configured ? 'connected' : 'local_fallback',
+    environment: process.env.NODE_ENV || 'development'
+  });
 };
