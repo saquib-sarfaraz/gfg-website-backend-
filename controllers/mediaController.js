@@ -279,6 +279,7 @@ exports.streamPdf = async (req, res) => {
             'Content-Disposition',
             `${isDownloadMode ? 'attachment' : 'inline'}; filename="${encodeURIComponent(safeFilename)}"`
           );
+          res.removeHeader('X-Frame-Options');
 
           return res.status(200).send(pdfBuf);
         } catch (err) {
@@ -299,6 +300,7 @@ exports.streamPdf = async (req, res) => {
           'Content-Disposition',
           `${isDownloadMode ? 'attachment' : 'inline'}; filename="${encodeURIComponent(safeFilename)}"`
         );
+        res.removeHeader('X-Frame-Options');
         return res.sendFile(localFilePath);
       }
     }

@@ -35,7 +35,13 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Security Headers Middleware
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
+  const fullUrl = req.originalUrl || req.url || '';
+  // Allow framing for media stream endpoints (PDF preview modal) while keeping DENY for standard API routes
+  if (fullUrl.includes('stream-pdf')) {
+    res.removeHeader('X-Frame-Options');
+  } else {
+    res.setHeader('X-Frame-Options', 'DENY');
+  }
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
@@ -63,6 +69,7 @@ app.use('/api/forms', formRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/media', mediaRoutes);
+app.use('/media', mediaRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/posts', postRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
