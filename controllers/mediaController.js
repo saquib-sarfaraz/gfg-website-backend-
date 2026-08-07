@@ -280,6 +280,7 @@ exports.streamPdf = async (req, res) => {
             `${isDownloadMode ? 'attachment' : 'inline'}; filename="${encodeURIComponent(safeFilename)}"`
           );
           res.removeHeader('X-Frame-Options');
+          res.setHeader('Content-Security-Policy', "frame-ancestors *");
 
           return res.status(200).send(pdfBuf);
         } catch (err) {

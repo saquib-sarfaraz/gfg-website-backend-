@@ -39,6 +39,7 @@ app.use((req, res, next) => {
   // Allow framing for media stream endpoints (PDF preview modal) while keeping DENY for standard API routes
   if (fullUrl.includes('stream-pdf')) {
     res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', "frame-ancestors *");
   } else {
     res.setHeader('X-Frame-Options', 'DENY');
   }
