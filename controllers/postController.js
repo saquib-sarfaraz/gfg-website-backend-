@@ -529,7 +529,11 @@ exports.addComment = async (req, res) => {
   try {
     const { clientRequestId } = req.body;
     if (!authorRef || !mongoose.Types.ObjectId.isValid(authorRef)) {
-      authorRef = await getOrCreateDefaultMember();
+      if (req.user && req.user._id) {
+        authorRef = req.user._id;
+      } else {
+        authorRef = await getOrCreateDefaultMember();
+      }
     }
 
     if (clientRequestId) {
