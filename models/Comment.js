@@ -6,6 +6,7 @@ const commentSchema = new mongoose.Schema({
   authorRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Member', required: true },
   content: { type: String, required: true },
   parentCommentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Comment', default: null, index: true },
+  clientRequestId: { type: String, sparse: true, index: true },
   likesCount: { type: Number, default: 0 },
   reportCount: { type: Number, default: 0 },
   moderationStatus: {

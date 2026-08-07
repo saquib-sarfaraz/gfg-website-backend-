@@ -145,16 +145,16 @@ const getOrCreateDefaultMember = async () => {
 };
 
 const resolveMemberFromReq = async (req) => {
-  const inputId = req.body?.memberId || req.query?.memberId || req.body?.authorRef;
-  if (inputId && mongoose.Types.ObjectId.isValid(inputId)) {
-    return inputId;
-  }
   if (req.user) {
     let member = await Member.findOne({ userRef: req.user._id });
     if (!member && req.user.email) {
       member = await Member.findOne({ email: req.user.email });
     }
     if (member) return member._id.toString();
+  }
+  const inputId = req.body?.memberId || req.query?.memberId || req.body?.authorRef;
+  if (inputId && mongoose.Types.ObjectId.isValid(inputId)) {
+    return inputId;
   }
   return await getOrCreateDefaultMember();
 };
@@ -218,7 +218,7 @@ exports.getPosts = async (req, res) => {
     }
 
     let posts = await Post.find(filterQuery)
-      .populate('authorRef', 'name photo role teamName email')
+      .populate('authorRef', 'name photo role teamName email username')
       .sort({ isPinned: -1, createdAt: -1 })
       .lean();
 
@@ -267,7 +267,7 @@ exports.getPostById = async (req, res) => {
   }
 
   try {
-    const post = await Post.findById(id).populate('authorRef', 'name photo role teamName email').lean();
+    const post = await Post.findById(id).populate('authorRef', 'name photo role teamName email username').lean();
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
 
     let isLiked = false;
@@ -324,6 +324,22 @@ exports.createPost = async (req, res) => {
 
   try {
     const authorRef = await resolveMemberFromReq(req);
+    const { clientRequestId } = req.body;
+
+    const contentWords = (content || '').trim().split(/\s+/).filter(Boolean).length;
+    if (contentWords > 500) {
+      return res.status(400).json({ success: false, message: 'Post content cannot exceed 500 words.' });
+    }
+    if (title && title.length > 120) {
+      return res.status(400).json({ success: false, message: 'Title cannot exceed 120 characters.' });
+    }
+
+    if (clientRequestId) {
+      const existingPost = await Post.findOne({ authorRef, clientRequestId }).populate('authorRef', 'name photo role teamName email username').lean();
+      if (existingPost) {
+        return res.status(200).json({ success: true, data: existingPost, isDuplicate: true });
+      }
+    }
 
     const post = await Post.create({
       communityId: 'gfg-jamia-hamdard',
@@ -333,10 +349,11 @@ exports.createPost = async (req, res) => {
       content,
       media: media || [],
       externalUrl: externalUrl || '',
-      tags: tags || []
+      tags: tags || [],
+      clientRequestId: clientRequestId || undefined
     });
 
-    const populated = await Post.findById(post._id).populate('authorRef', 'name photo role teamName email');
+    const populated = await Post.findById(post._id).populate('authorRef', 'name photo role teamName email username');
     return res.status(201).json({ success: true, data: populated });
   } catch (err) {
     console.error('Error creating post:', err);
@@ -460,7 +477,7 @@ exports.getComments = async (req, res) => {
 
   try {
     const comments = await Comment.find({ postId: id })
-      .populate('authorRef', 'name photo role teamName')
+      .populate('authorRef', 'name photo role teamName username')
       .sort({ createdAt: 1 })
       .lean();
 
@@ -510,8 +527,16 @@ exports.addComment = async (req, res) => {
   }
 
   try {
+    const { clientRequestId } = req.body;
     if (!authorRef || !mongoose.Types.ObjectId.isValid(authorRef)) {
       authorRef = await getOrCreateDefaultMember();
+    }
+
+    if (clientRequestId) {
+      const existingComment = await Comment.findOne({ authorRef, postId: id, clientRequestId }).populate('authorRef', 'name photo role teamName username').lean();
+      if (existingComment) {
+        return res.status(200).json({ success: true, data: { ...existingComment, replies: [] }, isDuplicate: true });
+      }
     }
 
     const comment = await Comment.create({
@@ -519,11 +544,12 @@ exports.addComment = async (req, res) => {
       postId: id,
       authorRef,
       content,
-      parentCommentId: parentCommentId || null
+      parentCommentId: parentCommentId || null,
+      clientRequestId: clientRequestId || undefined
     });
 
     const updatedPost = await Post.findByIdAndUpdate(id, { $inc: { commentsCount: 1 } }, { new: true });
-    const populated = await Comment.findById(comment._id).populate('authorRef', 'name photo role teamName').lean();
+    const populated = await Comment.findById(comment._id).populate('authorRef', 'name photo role teamName username').lean();
 
     if (updatedPost) {
       notifyPostUpdated(id, { commentsCount: updatedPost.commentsCount });

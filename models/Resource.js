@@ -6,6 +6,7 @@ const resourceSchema = new mongoose.Schema({
   description: { type: String, required: true },
   fileUrl: { type: String, required: true },
   publicId: { type: String, default: '' },
+  fileResourceType: { type: String, default: 'raw' },   // Cloudinary resource_type: 'raw' for PDFs, 'image' for others
   resourceType: { type: String, enum: ['PDF', 'Link', 'Video', 'Document'], default: 'PDF' },
   category: { type: String, enum: ['DSA', 'Development', 'Placement', 'Interview', 'Roadmaps', 'Notes', 'Other'], default: 'DSA' },
   access: { type: String, enum: ['Public', 'Members Only'], default: 'Public' },

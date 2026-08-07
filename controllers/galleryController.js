@@ -149,8 +149,21 @@ exports.createBatchGalleryItems = async (req, res) => {
 // UPDATE gallery item
 exports.updateGalleryItem = async (req, res) => {
   try {
-    const item = await Gallery.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!item) return res.status(404).json({ success: false, message: 'Gallery item not found' });
+    const existing = await Gallery.findById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'Gallery item not found' });
+
+    const oldPublicId = existing.publicId;
+    const updateData = { ...req.body };
+    delete updateData._id;
+
+    const item = await Gallery.findByIdAndUpdate(req.params.id, updateData, { new: true });
+
+    if (oldPublicId && updateData.publicId && oldPublicId !== updateData.publicId) {
+      deleteAsset(oldPublicId, 'image').catch(err =>
+        console.warn('[GalleryUpdate] Old Cloudinary image cleanup warning:', err.message)
+      );
+    }
+
     return res.json({ success: true, data: item });
   } catch (err) {
     return res.status(400).json({ success: false, error: err.message });

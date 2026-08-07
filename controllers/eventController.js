@@ -325,17 +325,23 @@ exports.getEventById = async (req, res) => {
 // CREATE new event
 exports.createEvent = async (req, res) => {
   try {
+    const status = req.body.status || 'Registration Open';
+    const isUpcoming = (status !== 'Completed' && status !== 'Archived');
     const eventData = {
       ...req.body,
       communityId: 'gfg-jamia-hamdard',
       source: req.body.source || 'admin',
-      status: req.body.status || 'Registration Open',
+      status,
+      isUpcoming: req.body.isUpcoming !== undefined ? req.body.isUpcoming : isUpcoming,
       banner: req.body.banner || 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1200&q=80'
     };
 
     // Strip empty or non-ObjectId _id sent from frontend forms
     if (!eventData._id || !mongoose.Types.ObjectId.isValid(eventData._id)) {
       delete eventData._id;
+    }
+    if (!eventData.formId || !mongoose.Types.ObjectId.isValid(eventData.formId)) {
+      delete eventData.formId;
     }
 
     const event = await Event.create(eventData);
@@ -352,19 +358,35 @@ exports.updateEvent = async (req, res) => {
     let event = await findEventByIdOrLegacy(id);
     if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
 
+    const oldPublicId = event.bannerPublicId || event.publicId;
     const updateData = { ...req.body };
     delete updateData._id;
+    if (!updateData.formId || !mongoose.Types.ObjectId.isValid(updateData.formId)) {
+      delete updateData.formId;
+    }
+
+    if (updateData.status) {
+      updateData.isUpcoming = (updateData.status !== 'Completed' && updateData.status !== 'Archived');
+    }
 
     if (typeof event.save === 'function') {
+      const newPublicId = updateData.bannerPublicId || updateData.publicId;
       Object.assign(event, updateData);
       await event.save();
+
+      if (oldPublicId && newPublicId && oldPublicId !== newPublicId) {
+        deleteAsset(oldPublicId, 'image').catch(err =>
+          console.warn('[EventUpdate] Old Cloudinary banner cleanup warning:', err.message)
+        );
+      }
+
       return res.json({ success: true, data: event });
     } else {
       return res.json({ success: true, data: { ...event, ...updateData } });
     }
   } catch (err) {
     console.error('[UpdateEvent Error]:', err);
-    return res.status(400).json({ success: false, error: err.message });
+    return res.status(400).json({ success: false, error: err.message, message: err.message });
   }
 };
 

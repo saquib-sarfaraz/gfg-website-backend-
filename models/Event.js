@@ -24,7 +24,7 @@ const eventSchema = new mongoose.Schema({
   gallery: [{ type: String }], // Array of image URLs from event
   status: {
     type: String,
-    enum: ['Draft', 'Published', 'Registration Open', 'Announced', 'Planning', 'Live', 'Completed', 'Archived'],
+    enum: ['Draft', 'Published', 'Registration Open', 'Announced', 'Planning', 'Live', 'Completed', 'Archived', 'Upcoming'],
     default: 'Registration Open'
   }
 }, { timestamps: true });

@@ -22,23 +22,16 @@ console.log(`[Cloudinary] Configuration detected: ${configured ? 'YES' : 'NO'}`)
 
 const isDev = process.env.NODE_ENV === 'development';
 
+const getErrorMessage = (err) => {
+  if (!err) return 'Unknown Cloudinary error';
+  if (typeof err === 'string') return err;
+  return err.message || err.error?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
+};
+
 /**
  * Uploads a file to Cloudinary and returns a normalized media object.
- *
- * Production behaviour:
- *   - Cloudinary success → normalized media object with secure_url
- *   - Cloudinary failure → throws error (no local fallback)
- *
- * Development behaviour:
- *   - Cloudinary success → normalized media object with secure_url
- *   - Cloudinary failure / not configured → local /uploads/ fallback
- *
- * @param {string} filePath   Absolute path to the temp file on disk
- * @param {string} folder     Cloudinary sub-folder (e.g. 'profiles', 'posts')
- * @returns {{ url, publicId, resourceType, format, width, height, bytes }}
  */
 const uploadMediaAsset = async (filePath, folder = 'general') => {
-  // ── Cloudinary upload ──────────────────────────────────────────────────────
   if (isCloudinaryConfigured()) {
     try {
       const result = await cloudinary.uploader.upload(filePath, {
@@ -46,7 +39,6 @@ const uploadMediaAsset = async (filePath, folder = 'general') => {
         resource_type: 'auto'
       });
 
-      // Remove temp file after successful upload
       if (fs.existsSync(filePath)) {
         try { fs.unlinkSync(filePath); } catch (_) {}
       }
@@ -61,26 +53,17 @@ const uploadMediaAsset = async (filePath, folder = 'general') => {
         bytes: result.bytes
       };
     } catch (err) {
-      // Remove temp file on failure to avoid accumulation
       if (fs.existsSync(filePath)) {
         try { fs.unlinkSync(filePath); } catch (_) {}
       }
-
-      if (!isDev) {
-        // Production: propagate the error — do NOT fall back to local storage
-        console.error('[Cloudinary] Upload failed in production:', err.message);
-        throw new Error('Media upload failed. Please try again.');
-      }
-
-      // Development only: log warning and fall through to local fallback
-      console.warn('[Cloudinary] Upload failed in development, falling back to local URL:', err.message);
+      const errMsg = getErrorMessage(err);
+      console.warn('[Cloudinary] uploadMediaAsset failed, switching to local storage fallback:', errMsg);
     }
-  } else if (!isDev) {
-    // Production with no Cloudinary credentials configured → error
-    throw new Error('Cloudinary is not configured. Media upload is unavailable.');
+  } else {
+    console.warn('[Cloudinary] Configuration missing — serving local storage path for media asset.');
   }
 
-  // ── Local fallback (development only) ────────────────────────────────────
+  // Guaranteed local storage fallback
   const uploadsDir = path.join(__dirname, '..', 'uploads', folder);
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
@@ -91,13 +74,11 @@ const uploadMediaAsset = async (filePath, folder = 'general') => {
 
   if (filePath !== destPath && fs.existsSync(filePath)) {
     fs.copyFileSync(filePath, destPath);
-    fs.unlinkSync(filePath);
+    try { fs.unlinkSync(filePath); } catch (_) {}
   }
 
   const stats = fs.existsSync(destPath) ? fs.statSync(destPath) : { size: 0 };
   const publicUrl = `/uploads/${folder}/${filename}`;
-
-  console.warn(`[Cloudinary] DEV fallback — serving local URL: ${publicUrl}`);
 
   return {
     url: publicUrl,
@@ -110,8 +91,81 @@ const uploadMediaAsset = async (filePath, folder = 'general') => {
   };
 };
 
+/**
+ * Uploads a PDF file to Cloudinary with local storage fallback.
+ */
+const uploadPdfAsset = async (filePath, folder = 'Resources') => {
+  if (isCloudinaryConfigured()) {
+    try {
+      const result = await cloudinary.uploader.upload(filePath, {
+        folder: `gfg-cmp/${folder}`,
+        resource_type: 'raw'
+      });
+
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch (_) {}
+      }
+
+      console.log(`[Cloudinary] PDF uploaded as raw → ${result.secure_url}`);
+
+      return {
+        url: result.secure_url,
+        publicId: result.public_id,
+        resourceType: result.resource_type,
+        format: result.format || 'pdf',
+        bytes: result.bytes
+      };
+    } catch (err) {
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch (_) {}
+      }
+      const errMsg = getErrorMessage(err);
+      console.warn('[Cloudinary] uploadPdfAsset failed, switching to local storage fallback:', errMsg);
+    }
+  } else {
+    console.warn('[Cloudinary] Configuration missing — serving local storage path for PDF asset.');
+  }
+
+  // Guaranteed local storage fallback
+  const uploadsDir = path.join(__dirname, '..', 'uploads', folder);
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  const filename = path.basename(filePath);
+  const destPath = path.join(uploadsDir, filename);
+
+  if (filePath !== destPath && fs.existsSync(filePath)) {
+    fs.copyFileSync(filePath, destPath);
+    try { fs.unlinkSync(filePath); } catch (_) {}
+  }
+
+  const stats = fs.existsSync(destPath) ? fs.statSync(destPath) : { size: 0 };
+  const publicUrl = `/uploads/${folder}/${filename}`;
+
+  return {
+    url: publicUrl,
+    publicId: `local_${Date.now()}_${filename}`,
+    resourceType: 'raw',
+    format: 'pdf',
+    bytes: stats.size
+  };
+};
+
+const deleteMediaAssetFromCloudinary = async (publicId, resourceType = 'auto') => {
+  if (!publicId || !isCloudinaryConfigured()) return;
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+    console.log(`[Cloudinary] Asset ${publicId} deleted successfully.`);
+  } catch (err) {
+    console.warn(`[Cloudinary] Destroy asset failed for ${publicId}:`, err.message);
+  }
+};
+
 module.exports = {
   cloudinary,
   isCloudinaryConfigured,
-  uploadMediaAsset
+  uploadMediaAsset,
+  uploadPdfAsset,
+  deleteMediaAssetFromCloudinary
 };

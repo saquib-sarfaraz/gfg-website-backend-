@@ -2,8 +2,9 @@ const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
   communityId: { type: String, default: 'gfg-jamia-hamdard', index: true },
+  userCode: { type: String, required: true, unique: true, immutable: true, index: true },
   username: { type: String, required: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  email: { type: String, required: true, unique: true, index: true, lowercase: true, trim: true },
   password: { type: String, required: true },
   phone: { type: String, default: '' },
   role: { type: String, enum: ['Visitor', 'Member', 'Admin', 'Super Admin'], default: 'Visitor' },

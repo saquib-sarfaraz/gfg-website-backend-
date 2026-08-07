@@ -35,6 +35,7 @@ const postSchema = new mongoose.Schema({
     index: true
   },
   isPinned: { type: Boolean, default: false },
+  clientRequestId: { type: String, sparse: true, index: true },
   status: { type: String, enum: ['Active', 'Reported', 'Archived'], default: 'Active' }
 }, { timestamps: true });
 

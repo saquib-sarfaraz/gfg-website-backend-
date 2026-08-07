@@ -6,8 +6,8 @@ const mediaAssetSchema = new mongoose.Schema({
   publicId: { type: String, required: true },
   folder: {
     type: String,
-    enum: ['Faculty', 'Campus Mantri', 'Members', 'Teams', 'Events', 'Gallery', 'Resources', 'Sponsors', 'Logos', 'General', 'Posts'],
-    default: 'General'
+    default: 'General',
+    index: true
   },
   filename: { type: String, required: true },
   size: { type: Number, default: 0 },

@@ -7,6 +7,8 @@ const AdminAccess = require('../models/AdminAccess');
 const AdminAuditLog = require('../models/AdminAuditLog');
 const { JWT_SECRET } = require('../middleware/auth');
 
+const { generateUserCode } = require('../utils/userCodeGenerator');
+
 // SIGNUP HANDLER (Public User Signup -> Visitor)
 exports.signup = async (req, res) => {
   try {
@@ -39,13 +41,29 @@ exports.signup = async (req, res) => {
     if (mongoose.connection.readyState === 1) {
       const existingUser = await User.findOne({ email: normalizedEmail });
       if (existingUser) {
-        return res.status(400).json({ success: false, message: 'This email is already registered. Please sign in instead.' });
+        return res.status(409).json({ success: false, message: 'An account already exists with this email. Sign in instead.' });
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
+      const cleanUsername = fullName.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || `user_${Date.now()}`;
+
+      // Generate unique platform userCode
+      let userCode;
+      let isCodeUnique = false;
+      let attempts = 0;
+      while (!isCodeUnique && attempts < 10) {
+        userCode = generateUserCode();
+        const codeCollision = await User.findOne({ userCode }) || await Member.findOne({ userCode });
+        if (!codeCollision) {
+          isCodeUnique = true;
+        }
+        attempts++;
+      }
 
       const newMember = await Member.create({
+        userCode,
         name: fullName.trim(),
+        username: cleanUsername,
         email: normalizedEmail,
         phone: phone ? phone.trim() : '',
         teamName: 'General',
@@ -58,7 +76,8 @@ exports.signup = async (req, res) => {
       });
 
       const newUser = await User.create({
-        username: fullName.trim(),
+        userCode,
+        username: cleanUsername,
         email: normalizedEmail,
         password: hashedPassword,
         phone: phone ? phone.trim() : '',
@@ -76,7 +95,7 @@ exports.signup = async (req, res) => {
       req.app.get('io')?.emit('admin:member-created', { member: newMember, user: newUser });
 
       const token = jwt.sign(
-        { id: newUser._id, username: newUser.username, email: newUser.email, role: 'Visitor', memberId: newMember._id },
+        { id: newUser._id, userCode: newUser.userCode, username: newUser.username, email: newUser.email, role: 'Visitor', memberId: newMember._id },
         JWT_SECRET,
         { expiresIn: '7d' }
       );
@@ -87,6 +106,7 @@ exports.signup = async (req, res) => {
         token,
         user: {
           id: newUser._id,
+          userCode: newUser.userCode,
           username: newUser.username,
           email: newUser.email,
           role: 'Visitor',
@@ -99,8 +119,13 @@ exports.signup = async (req, res) => {
       return res.status(503).json({ success: false, message: 'Database connection offline. Please check MongoDB Atlas connection.' });
     }
   } catch (err) {
+    if (err.code === 11000) {
+      if (err.keyPattern && err.keyPattern.email) {
+        return res.status(409).json({ success: false, message: 'An account already exists with this email. Sign in instead.' });
+      }
+    }
     console.error('[Signup Error]:', err);
-    return res.status(500).json({ success: false, message: 'Signup failed: ' + err.message });
+    return res.status(500).json({ success: false, message: 'Signup failed. Please try again.' });
   }
 };
 

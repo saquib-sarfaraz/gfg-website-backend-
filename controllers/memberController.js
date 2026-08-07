@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 const Member = require('../models/Member');
 const Post = require('../models/Post');
+const Like = require('../models/Like');
+const Bookmark = require('../models/Bookmark');
+const Comment = require('../models/Comment');
 
 // Get all members with search and role/team/accountType filter
 exports.getMembers = async (req, res) => {
@@ -27,7 +30,9 @@ exports.getMembers = async (req, res) => {
       } else if (role === 'Members') {
         query.accountType = { $regex: /^member$/i };
       } else if (role === 'Leads') {
-        query.role = { $regex: /lead/i };
+        query.role = { $regex: /\blead\b/i };
+      } else if (role === 'Co-Leads') {
+        query.role = { $regex: /co-lead/i };
       } else if (role === 'Campus Ambassadors') {
         query.role = { $regex: /ambassador/i };
       } else if (role === 'Campus Mantri') {
@@ -58,7 +63,7 @@ exports.getMembers = async (req, res) => {
     }
 
     if (mongoose.connection.readyState === 1) {
-      const members = await Member.find(query).sort({ createdAt: -1 });
+      const members = await Member.find(query).populate('userRef', '-password -pinHash -otpSecret -resetToken').sort({ createdAt: -1 });
       return res.json({ success: true, count: members.length, data: members });
     } else {
       console.warn('[Member Controller]: DB not connected, returning empty array');
@@ -111,7 +116,20 @@ exports.updateMembership = async (req, res) => {
     if (!member) return res.status(404).json({ success: false, message: 'Member not found' });
 
     if (accountType) member.accountType = accountType;
-    if (role) member.role = role;
+    if (role) {
+      member.role = role;
+      if (!teamName) {
+        if (role.startsWith('Technical')) member.teamName = 'Technical';
+        else if (role.startsWith('Event')) member.teamName = 'Event';
+        else if (role.startsWith('PR')) member.teamName = 'PR';
+        else if (role.startsWith('Design')) member.teamName = 'Design';
+        else if (role.startsWith('Social Media')) member.teamName = 'Social Media';
+        else if (role.startsWith('Community')) member.teamName = 'Community';
+        else if (role === 'Campus Mantri') member.teamName = 'Leadership';
+        else if (role === 'Faculty Coordinator') member.teamName = 'Faculty';
+        else member.teamName = 'General';
+      }
+    }
     if (membershipStatus) member.membershipStatus = membershipStatus;
     if (session) member.session = session;
     if (teamName) member.teamName = teamName;
@@ -163,33 +181,54 @@ exports.updateSelfProfile = async (req, res) => {
     github, linkedin, portfolio, instagram, website
   } = req.body;
 
-  const allowedUpdates = {
-    ...(photo !== undefined && { photo }),
-    ...(photoPublicId !== undefined && { photoPublicId }),
-    ...(coverPhoto !== undefined && { coverPhoto }),
-    ...(coverPhotoPublicId !== undefined && { coverPhotoPublicId }),
-    ...(bio !== undefined && { bio }),
-    ...(about !== undefined && { about }),
-    ...(skills !== undefined && { skills }),
-    ...(expertise !== undefined && { expertise }),
-    ...(github !== undefined && { github }),
-    ...(linkedin !== undefined && { linkedin }),
-    ...(portfolio !== undefined && { portfolio }),
-    ...(instagram !== undefined && { instagram }),
-    ...(website !== undefined && { website })
-  };
-
   try {
     let filter = {};
     if (mongoose.Types.ObjectId.isValid(memberId)) {
       filter = { $or: [{ _id: memberId }, { userRef: memberId }] };
     } else {
-      filter = { $or: [{ legacyId: memberId }, { membershipId: memberId }, { email: memberId }] };
+      filter = { $or: [{ legacyId: memberId }, { membershipId: memberId }, { email: memberId }, { username: memberId }] };
     }
 
-    const updated = await Member.findOneAndUpdate(filter, allowedUpdates, { new: true, runValidators: true });
-    if (!updated) return res.status(404).json({ success: false, message: 'Member profile not found' });
+    const targetMember = await Member.findOne(filter);
+    if (!targetMember) {
+      return res.status(404).json({ success: false, message: 'Member profile not found' });
+    }
 
+    // Strict Server-Side Authorization Check
+    if (req.user) {
+      const callingUserId = req.user._id ? req.user._id.toString() : (req.user.id ? req.user.id.toString() : '');
+      const isAdmin = Boolean(req.user.isAdmin || req.user.adminRole === 'ROOT_SUPER_ADMIN');
+
+      const ownerUserId = targetMember.userRef ? targetMember.userRef.toString() : '';
+      const ownerMemberId = targetMember._id.toString();
+
+      const isAuthorized = isAdmin || (callingUserId && (callingUserId === ownerUserId || callingUserId === ownerMemberId));
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You can only edit your own profile.'
+        });
+      }
+    }
+
+    const allowedUpdates = {
+      ...(photo !== undefined && { photo }),
+      ...(photoPublicId !== undefined && { photoPublicId }),
+      ...(coverPhoto !== undefined && { coverPhoto }),
+      ...(coverPhotoPublicId !== undefined && { coverPhotoPublicId }),
+      ...(bio !== undefined && { bio }),
+      ...(about !== undefined && { about }),
+      ...(skills !== undefined && { skills }),
+      ...(expertise !== undefined && { expertise }),
+      ...(github !== undefined && { github }),
+      ...(linkedin !== undefined && { linkedin }),
+      ...(portfolio !== undefined && { portfolio }),
+      ...(instagram !== undefined && { instagram }),
+      ...(website !== undefined && { website })
+    };
+
+    const updated = await Member.findByIdAndUpdate(targetMember._id, allowedUpdates, { new: true, runValidators: true });
     return res.json({ success: true, data: updated });
   } catch (error) {
     return res.status(400).json({ success: false, error: error.message });
@@ -208,9 +247,11 @@ exports.getProfile = async (req, res) => {
     if (!member) {
       member = await Member.findOne({
         $or: [
+          { username: id },
           { legacyId: id },
           { membershipId: id },
-          { email: id }
+          { email: id },
+          { name: { $regex: new RegExp(`^${id.replace(/-/g, ' ')}$`, 'i') } }
         ]
       });
     }
@@ -311,11 +352,339 @@ exports.getMyPosts = async (req, res) => {
 
     const posts = await Post.find({
       authorRef: member._id,
-      moderationStatus: { $nin: ['removed'] }
+      moderationStatus: { $nin: ['removed', 'hidden'] }
     }).populate('authorRef', 'name photo role teamName email').sort({ createdAt: -1 });
 
     return res.json({ success: true, count: posts.length, posts, data: posts });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// GET /api/members/:memberId/posts — Returns specified member's posts by canonical Member._id
+exports.getMemberPosts = async (req, res) => {
+  try {
+    const { id, memberId: paramMemberId } = req.params;
+    const inputId = id || paramMemberId;
+    let targetMemberId = null;
+
+    if (inputId === 'me') {
+      if (!req.user) {
+        return res.status(401).json({ success: false, message: 'Authentication required' });
+      }
+      let member = await Member.findOne({ userRef: req.user._id });
+      if (!member && req.user.email) {
+        member = await Member.findOne({ email: req.user.email });
+      }
+      if (member) targetMemberId = member._id;
+    } else if (mongoose.Types.ObjectId.isValid(inputId)) {
+      targetMemberId = inputId;
+    } else {
+      const member = await Member.findOne({
+        $or: [
+          { userRef: inputId },
+          { email: inputId },
+          { membershipId: inputId },
+          { legacyId: inputId }
+        ]
+      });
+      if (member) targetMemberId = member._id;
+    }
+
+    if (!targetMemberId) {
+      return res.json({ success: true, count: 0, data: [], posts: [] });
+    }
+
+    let posts = await Post.find({
+      authorRef: targetMemberId,
+      moderationStatus: { $nin: ['removed', 'hidden'] }
+    })
+      .populate('authorRef', 'name photo role teamName email userCode')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    let currentMemberId = null;
+    if (req.user) {
+      const currentMember = await Member.findOne({ userRef: req.user._id });
+      if (currentMember) currentMemberId = currentMember._id;
+    }
+
+    if (currentMemberId) {
+      const postIds = posts.map(p => p._id);
+      const [userLikes, userBookmarks] = await Promise.all([
+        Like.find({ memberRef: currentMemberId, postRef: { $in: postIds } }).select('postRef'),
+        Bookmark.find({ memberRef: currentMemberId, postRef: { $in: postIds } }).select('postRef')
+      ]);
+
+      const likedSet = new Set(userLikes.map(l => l.postRef.toString()));
+      const bookmarkedSet = new Set(userBookmarks.map(b => b.postRef.toString()));
+
+      posts = posts.map(p => ({
+        ...p,
+        isLiked: likedSet.has(p._id.toString()),
+        isBookmarked: bookmarkedSet.has(p._id.toString())
+      }));
+    } else {
+      posts = posts.map(p => ({ ...p, isLiked: false, isBookmarked: false }));
+    }
+
+    return res.json({ success: true, count: posts.length, data: posts, posts });
+  } catch (err) {
+    console.error('[getMemberPosts Error]:', err);
+    return res.status(500).json({ success: false, error: err.message, data: [], posts: [] });
+  }
+};
+
+// GET /api/members/profile/:identifier — Returns public sanitized profile by Member._id or username
+exports.getPublicProfile = async (req, res) => {
+  const { identifier, username } = req.params;
+  const target = (identifier || username || '').trim();
+
+  try {
+    if (!target) {
+      return res.status(400).json({ success: false, message: 'Member identifier required' });
+    }
+
+    let member = null;
+
+    // 1. Try finding by MongoDB ObjectId first
+    if (mongoose.Types.ObjectId.isValid(target)) {
+      member = await Member.findById(target);
+    }
+
+    // 2. Fall back to username slug or membershipId
+    if (!member) {
+      const cleanTarget = target.toLowerCase();
+      const cleanName = cleanTarget.replace(/-/g, ' ');
+      member = await Member.findOne({
+        $or: [
+          { username: cleanTarget },
+          { name: { $regex: new RegExp(`^${cleanName}$`, 'i') } },
+          { membershipId: target },
+          { legacyId: target }
+        ]
+      });
+    }
+
+    if (!member) {
+      return res.status(404).json({ success: false, message: 'Member profile not found' });
+    }
+
+    const postsCount = await Post.countDocuments({
+      authorRef: member._id,
+      moderationStatus: { $nin: ['removed', 'hidden'] }
+    });
+
+    // Whitelist ONLY public safe fields (Strict Privacy)
+    const publicProfile = {
+      _id: member._id,
+      userCode: member.userCode,
+      username: member.username || member._id.toString(),
+      name: member.name,
+      photo: member.photo,
+      coverPhoto: member.coverPhoto,
+      role: member.role || 'Member',
+      teamName: member.teamName || 'General',
+      accountType: member.accountType || 'Visitor',
+      bio: member.bio || '',
+      about: member.about || '',
+      college: member.college || 'Jamia Hamdard',
+      department: member.department || 'Computer Science & Engineering',
+      skills: member.skills || [],
+      expertise: member.expertise || [],
+      interests: member.interests || [],
+      github: member.github || '',
+      linkedin: member.linkedin || '',
+      portfolio: member.portfolio || '',
+      instagram: member.instagram || '',
+      website: member.website || '',
+      session: member.session || '2026–27',
+      joinedAt: member.createdAt,
+      postsCount
+    };
+
+    return res.json({ success: true, member: publicProfile, data: publicProfile });
+  } catch (err) {
+    console.error('[getPublicProfile Error]:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// GET /api/members/profile/:identifier/posts — Returns public member's canonical posts
+exports.getPublicMemberPosts = async (req, res) => {
+  const { identifier, username } = req.params;
+  const target = (identifier || username || '').trim();
+
+  try {
+    if (!target) {
+      return res.json({ success: true, count: 0, posts: [], data: [] });
+    }
+
+    let member = null;
+    if (mongoose.Types.ObjectId.isValid(target)) {
+      member = await Member.findById(target);
+    }
+
+    if (!member) {
+      const cleanTarget = target.toLowerCase();
+      const cleanName = cleanTarget.replace(/-/g, ' ');
+      member = await Member.findOne({
+        $or: [
+          { username: cleanTarget },
+          { name: { $regex: new RegExp(`^${cleanName}$`, 'i') } },
+          { membershipId: target },
+          { userCode: target }
+        ]
+      });
+    }
+
+    if (!member) {
+      return res.json({ success: true, count: 0, posts: [], data: [] });
+    }
+
+    let posts = await Post.find({
+      authorRef: member._id,
+      moderationStatus: { $nin: ['removed', 'hidden'] }
+    })
+      .populate('authorRef', 'name photo role teamName username userCode')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    let currentMemberId = null;
+    if (req.user) {
+      const currentMember = await Member.findOne({ userRef: req.user._id });
+      if (currentMember) currentMemberId = currentMember._id;
+    }
+
+    if (currentMemberId) {
+      const postIds = posts.map(p => p._id);
+      const [userLikes, userBookmarks] = await Promise.all([
+        Like.find({ memberRef: currentMemberId, postRef: { $in: postIds } }).select('postRef'),
+        Bookmark.find({ memberRef: currentMemberId, postRef: { $in: postIds } }).select('postRef')
+      ]);
+
+      const likedSet = new Set(userLikes.map(l => l.postRef.toString()));
+      const bookmarkedSet = new Set(userBookmarks.map(b => b.postRef.toString()));
+
+      posts = posts.map(p => ({
+        ...p,
+        isLiked: likedSet.has(p._id.toString()),
+        isBookmarked: bookmarkedSet.has(p._id.toString())
+      }));
+    } else {
+      posts = posts.map(p => ({ ...p, isLiked: false, isBookmarked: false }));
+    }
+
+    return res.json({ success: true, count: posts.length, posts, data: posts });
+  } catch (err) {
+    console.error('[getPublicMemberPosts Error]:', err);
+    return res.status(500).json({ success: false, error: err.message, posts: [], data: [] });
+  }
+};
+
+// GET /api/members/active — Calculates top active members over last 30 days based on real community activity
+exports.getActiveMembers = async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.json({ success: true, count: 0, members: [], data: [] });
+  }
+
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const members = await Member.find({ communityId: 'gfg-jamia-hamdard', status: 'Active' })
+      .select('_id userCode name username photo role teamName accountType')
+      .lean();
+
+    const [recentPosts, recentComments] = await Promise.all([
+      Post.find({
+        communityId: 'gfg-jamia-hamdard',
+        status: 'Active',
+        moderationStatus: { $nin: ['hidden', 'removed'] },
+        createdAt: { $gte: thirtyDaysAgo }
+      }).lean(),
+
+      Comment.find({
+        communityId: 'gfg-jamia-hamdard',
+        moderationStatus: { $nin: ['hidden', 'removed'] },
+        isDeleted: { $ne: true },
+        createdAt: { $gte: thirtyDaysAgo }
+      }).lean()
+    ]);
+
+    const memberScores = members.map((m) => {
+      const mId = m._id.toString();
+
+      const memberPosts = recentPosts.filter(p => p.authorRef && p.authorRef.toString() === mId);
+      const memberComments = recentComments.filter(c => c.authorRef && c.authorRef.toString() === mId);
+
+      const postsCount = memberPosts.length;
+      const topCommentsCount = memberComments.filter(c => !c.parentCommentId).length;
+      const repliesCount = memberComments.filter(c => c.parentCommentId).length;
+
+      const postLikesReceived = memberPosts.reduce((acc, p) => acc + (p.likesCount || 0), 0);
+      const commentLikesReceived = memberComments.reduce((acc, c) => acc + (c.likesCount || 0), 0);
+      const savesReceived = memberPosts.reduce((acc, p) => acc + (p.bookmarksCount || 0), 0);
+
+      const score = (postsCount * 10) +
+                    (topCommentsCount * 5) +
+                    (repliesCount * 3) +
+                    (postLikesReceived * 2) +
+                    (commentLikesReceived * 1) +
+                    (savesReceived * 3);
+
+      let lastActivityAt = null;
+      memberPosts.forEach(p => {
+        if (!lastActivityAt || new Date(p.createdAt) > lastActivityAt) lastActivityAt = new Date(p.createdAt);
+      });
+      memberComments.forEach(c => {
+        if (!lastActivityAt || new Date(c.createdAt) > lastActivityAt) lastActivityAt = new Date(c.createdAt);
+      });
+
+      return {
+        _id: m._id,
+        userCode: m.userCode || '',
+        fullName: m.name || 'Community Member',
+        name: m.name || 'Community Member',
+        username: m.username || m._id.toString(),
+        photo: m.photo || '',
+        avatar: { url: m.photo || '' },
+        role: m.role || 'Member',
+        teamName: m.teamName || 'General',
+        activityScore: score,
+        lastActivityAt: lastActivityAt || null
+      };
+    });
+
+    const activeOnly = memberScores.filter(m => m.activityScore > 0);
+    activeOnly.sort((a, b) => {
+      if (b.activityScore !== a.activityScore) return b.activityScore - a.activityScore;
+      return (b.lastActivityAt || 0) - (a.lastActivityAt || 0);
+    });
+
+    const resultMembers = activeOnly.length > 0
+      ? activeOnly.slice(0, 5)
+      : members.slice(0, 4).map(m => ({
+          _id: m._id,
+          userCode: m.userCode || '',
+          fullName: m.name,
+          name: m.name,
+          username: m.username || m._id.toString(),
+          photo: m.photo || '',
+          avatar: { url: m.photo || '' },
+          role: m.role || 'Member',
+          teamName: m.teamName || 'General',
+          activityScore: 0
+        }));
+
+    return res.json({
+      success: true,
+      count: resultMembers.length,
+      members: resultMembers,
+      data: resultMembers
+    });
+  } catch (err) {
+    console.error('[getActiveMembers Error]:', err);
+    return res.status(500).json({ success: false, error: err.message, members: [], data: [] });
   }
 };

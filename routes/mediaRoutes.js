@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { uploadMedia, getMediaAssets, deleteMediaAsset, getMediaHealth } = require('../controllers/mediaController');
+const { uploadMedia, uploadPdf, getMediaAssets, deleteMediaAsset, getMediaHealth, streamPdf } = require('../controllers/mediaController');
 const { authMiddleware } = require('../middleware/auth');
 
 // Ensure tmp directory exists
@@ -40,7 +40,10 @@ const normalizeFileField = (req, res, next) => {
 };
 
 router.get('/health', getMediaHealth);
+router.get('/stream-pdf', streamPdf);
 router.post('/upload', authMiddleware, uploadFields, normalizeFileField, uploadMedia);
+// Dedicated PDF upload — uses resource_type:'raw' to produce correct delivery URL
+router.post('/upload-pdf', authMiddleware, uploadFields, normalizeFileField, uploadPdf);
 router.get('/', getMediaAssets);
 router.delete('/:id', authMiddleware, deleteMediaAsset);
 
