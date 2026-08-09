@@ -28,7 +28,8 @@ const adminAuditLogSchema = new mongoose.Schema({
       'ADMIN_ROLE_CHANGED',
       'ADMIN_PERMISSION_CHANGED',
       'ADMIN_SUSPENDED',
-      'ADMIN_UNSUSPENDED'
+      'ADMIN_UNSUSPENDED',
+      'AUDIT_LOGS_CLEANUP'
     ]
   },
   details: { 

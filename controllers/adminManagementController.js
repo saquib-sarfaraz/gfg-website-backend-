@@ -273,3 +273,68 @@ exports.getAuditLogs = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to fetch security audit logs: ' + err.message });
   }
 };
+
+// 7. GET AUDIT LOGS RETENTION SUMMARY
+exports.getAuditLogsRetentionSummary = async (req, res) => {
+  try {
+    const retentionDays = parseInt(process.env.AUDIT_LOG_RETENTION_DAYS || '30', 10);
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+
+    const [totalLogs, oldestLog, newestLog, eligibleCount] = await Promise.all([
+      AdminAuditLog.countDocuments({}),
+      AdminAuditLog.findOne({}).sort({ createdAt: 1 }),
+      AdminAuditLog.findOne({}).sort({ createdAt: -1 }),
+      AdminAuditLog.countDocuments({ createdAt: { $lt: cutoffDate } })
+    ]);
+
+    return res.json({
+      success: true,
+      retentionDays,
+      cutoffDate,
+      totalLogs,
+      oldestLogDate: oldestLog ? oldestLog.createdAt : null,
+      newestLogDate: newestLog ? newestLog.createdAt : null,
+      eligibleForCleanup: eligibleCount
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch audit log retention summary: ' + err.message });
+  }
+};
+
+// 8. MANUAL AUDIT LOGS CLEANUP (ROOT SUPER ADMIN ONLY)
+exports.cleanupAuditLogs = async (req, res) => {
+  try {
+    if (req.adminAccess?.adminRole !== 'ROOT_SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Only Root Super Admin can perform audit log cleanup.' });
+    }
+
+    const retentionDays = parseInt(process.env.AUDIT_LOG_RETENTION_DAYS || '30', 10);
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+
+    const deleteResult = await AdminAuditLog.deleteMany({
+      createdAt: { $lt: cutoffDate }
+    });
+
+    // Log the cleanup operation itself
+    await AdminAuditLog.create({
+      operatorRef: req.user._id,
+      operatorEmail: req.user.email,
+      action: 'AUDIT_LOGS_CLEANUP',
+      details: `Purged ${deleteResult.deletedCount || 0} audit log entries older than ${retentionDays} days`,
+      ipAddress: req.ip || '',
+      userAgent: req.headers['user-agent'] || ''
+    });
+
+    return res.json({
+      success: true,
+      deletedCount: deleteResult.deletedCount || 0,
+      retentionDays,
+      message: `✓ Successfully cleaned up ${deleteResult.deletedCount || 0} audit logs older than ${retentionDays} days.`
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to clean up audit logs: ' + err.message });
+  }
+};
+

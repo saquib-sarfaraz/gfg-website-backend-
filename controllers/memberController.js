@@ -1,9 +1,72 @@
 const mongoose = require('mongoose');
+const User = require('../models/User');
 const Member = require('../models/Member');
+const AdminAccess = require('../models/AdminAccess');
 const Post = require('../models/Post');
 const Like = require('../models/Like');
 const Bookmark = require('../models/Bookmark');
 const Comment = require('../models/Comment');
+
+// Defensive read resolver for multi-key Member resolution without data mutation
+const findMemberByAnyIdentifier = async (target, currentUser = null) => {
+  if (!target) return null;
+  const cleanTarget = String(target).trim();
+  if (!cleanTarget) return null;
+
+  let member = null;
+
+  // 1. Handle '/me' identifier -> authenticated User._id -> User.memberRef -> Member.userRef
+  if (cleanTarget.toLowerCase() === 'me') {
+    if (currentUser) {
+      const userId = currentUser._id || currentUser.id;
+      if (currentUser.memberRef) {
+        member = await Member.findById(currentUser.memberRef);
+      }
+      if (!member && userId) {
+        member = await Member.findOne({ userRef: userId });
+      }
+      if (!member && currentUser.email) {
+        member = await Member.findOne({ email: currentUser.email.toLowerCase() });
+      }
+      if (member) return member;
+    }
+    // Fallback read resolution for unauthenticated /me requests
+    const fallback = await Member.findOne({ email: 'saquib@gfgcampus.org' });
+    if (fallback) return fallback;
+  }
+
+  // 2. Try User.memberRef & Member.userRef if target is a valid ObjectId
+  if (mongoose.Types.ObjectId.isValid(cleanTarget)) {
+    const userDoc = await User.findById(cleanTarget);
+    if (userDoc && userDoc.memberRef) {
+      member = await Member.findById(userDoc.memberRef);
+      if (member) return member;
+    }
+    member = await Member.findOne({ userRef: cleanTarget });
+    if (member) return member;
+
+    member = await Member.findById(cleanTarget);
+    if (member) return member;
+  }
+
+  // 3. Fall back to userCode, membershipId, username, email, legacyId, name
+  const lowerTarget = cleanTarget.toLowerCase();
+  const cleanName = lowerTarget.replace(/-/g, ' ');
+  const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  member = await Member.findOne({
+    $or: [
+      { userCode: cleanTarget },
+      { membershipId: cleanTarget },
+      { username: lowerTarget },
+      { email: lowerTarget },
+      { legacyId: cleanTarget },
+      { name: { $regex: new RegExp(`^${escapedName}$`, 'i') } }
+    ]
+  });
+
+  return member;
+};
 
 // Get all members with search and role/team/accountType filter
 exports.getMembers = async (req, res) => {
@@ -240,25 +303,7 @@ exports.getProfile = async (req, res) => {
   const { id } = req.params;
 
   try {
-    let member = null;
-    if (mongoose.Types.ObjectId.isValid(id)) {
-      member = await Member.findById(id) || await Member.findOne({ userRef: id });
-    }
-    if (!member) {
-      member = await Member.findOne({
-        $or: [
-          { username: id },
-          { legacyId: id },
-          { membershipId: id },
-          { email: id },
-          { name: { $regex: new RegExp(`^${id.replace(/-/g, ' ')}$`, 'i') } }
-        ]
-      });
-    }
-    if (!member && (id === 'm_saquib' || id === 'me')) {
-      member = await Member.findOne({ email: 'saquib@gfgcampus.org' }) || await Member.findOne();
-    }
-
+    const member = await findMemberByAnyIdentifier(id, req.user);
     if (!member) return res.status(404).json({ success: false, message: 'Member profile not found' });
     return res.json({ success: true, data: member });
   } catch (error) {
@@ -304,13 +349,50 @@ exports.verifyMember = async (req, res) => {
   }
 };
 
-// Delete member
+// Delete member (Removes community membership record while preserving platform User account)
 exports.deleteMember = async (req, res) => {
   try {
-    const member = await Member.findByIdAndDelete(req.params.id);
-    if (!member) return res.status(404).json({ success: false, message: 'Member not found' });
-    req.app.get('io')?.emit('admin:member-updated', { memberId: req.params.id });
-    return res.json({ success: true, message: 'Member removed successfully' });
+    const { id } = req.params;
+    const member = await Member.findById(id);
+    if (!member) {
+      return res.status(404).json({ success: false, message: 'Member not found' });
+    }
+
+    // SERVER-SIDE HARD PROTECTION FOR ROOT SUPER ADMIN
+    let linkedUserId = member.userRef;
+    if (!linkedUserId && member.email) {
+      const linkedUser = await User.findOne({ email: member.email.toLowerCase() });
+      if (linkedUser) linkedUserId = linkedUser._id;
+    }
+
+    if (linkedUserId) {
+      const user = await User.findById(linkedUserId);
+      if (user) {
+        const adminAccess = await AdminAccess.findOne({ userRef: user._id });
+        if (
+          user.role === 'Super Admin' ||
+          (adminAccess && adminAccess.adminRole === 'ROOT_SUPER_ADMIN') ||
+          user.email === 'admin@gfgcampus.org'
+        ) {
+          return res.status(403).json({ success: false, message: 'Root Super Admin cannot be deleted.' });
+        }
+
+        // Unset User.memberRef ONLY if it points to this Member being removed
+        if (user.memberRef && user.memberRef.toString() === member._id.toString()) {
+          user.memberRef = undefined;
+          await user.save();
+        }
+      }
+    }
+
+    // Delete ONLY the Member collection document
+    await Member.findByIdAndDelete(member._id);
+
+    req.app.get('io')?.emit('admin:member-updated', { memberId: member._id });
+    return res.json({
+      success: true,
+      message: 'Community membership removed successfully. Platform user account and credentials preserved.'
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -366,34 +448,13 @@ exports.getMemberPosts = async (req, res) => {
   try {
     const { id, memberId: paramMemberId } = req.params;
     const inputId = id || paramMemberId;
-    let targetMemberId = null;
-
-    if (inputId === 'me') {
-      if (!req.user) {
-        return res.status(401).json({ success: false, message: 'Authentication required' });
-      }
-      let member = await Member.findOne({ userRef: req.user._id });
-      if (!member && req.user.email) {
-        member = await Member.findOne({ email: req.user.email });
-      }
-      if (member) targetMemberId = member._id;
-    } else if (mongoose.Types.ObjectId.isValid(inputId)) {
-      targetMemberId = inputId;
-    } else {
-      const member = await Member.findOne({
-        $or: [
-          { userRef: inputId },
-          { email: inputId },
-          { membershipId: inputId },
-          { legacyId: inputId }
-        ]
-      });
-      if (member) targetMemberId = member._id;
-    }
-
-    if (!targetMemberId) {
+    
+    const member = await findMemberByAnyIdentifier(inputId, req.user);
+    if (!member) {
       return res.json({ success: true, count: 0, data: [], posts: [] });
     }
+
+    const targetMemberId = member._id;
 
     let posts = await Post.find({
       authorRef: targetMemberId,
@@ -435,7 +496,7 @@ exports.getMemberPosts = async (req, res) => {
   }
 };
 
-// GET /api/members/profile/:identifier — Returns public sanitized profile by Member._id or username
+// GET /api/members/profile/:identifier — Returns public sanitized profile by Member._id, User._id, or username
 exports.getPublicProfile = async (req, res) => {
   const { identifier, username } = req.params;
   const target = (identifier || username || '').trim();
@@ -445,26 +506,7 @@ exports.getPublicProfile = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Member identifier required' });
     }
 
-    let member = null;
-
-    // 1. Try finding by MongoDB ObjectId first
-    if (mongoose.Types.ObjectId.isValid(target)) {
-      member = await Member.findById(target);
-    }
-
-    // 2. Fall back to username slug or membershipId
-    if (!member) {
-      const cleanTarget = target.toLowerCase();
-      const cleanName = cleanTarget.replace(/-/g, ' ');
-      member = await Member.findOne({
-        $or: [
-          { username: cleanTarget },
-          { name: { $regex: new RegExp(`^${cleanName}$`, 'i') } },
-          { membershipId: target },
-          { legacyId: target }
-        ]
-      });
-    }
+    const member = await findMemberByAnyIdentifier(target, req.user);
 
     if (!member) {
       return res.status(404).json({ success: false, message: 'Member profile not found' });
@@ -520,23 +562,7 @@ exports.getPublicMemberPosts = async (req, res) => {
       return res.json({ success: true, count: 0, posts: [], data: [] });
     }
 
-    let member = null;
-    if (mongoose.Types.ObjectId.isValid(target)) {
-      member = await Member.findById(target);
-    }
-
-    if (!member) {
-      const cleanTarget = target.toLowerCase();
-      const cleanName = cleanTarget.replace(/-/g, ' ');
-      member = await Member.findOne({
-        $or: [
-          { username: cleanTarget },
-          { name: { $regex: new RegExp(`^${cleanName}$`, 'i') } },
-          { membershipId: target },
-          { userCode: target }
-        ]
-      });
-    }
+    const member = await findMemberByAnyIdentifier(target, req.user);
 
     if (!member) {
       return res.json({ success: true, count: 0, posts: [], data: [] });
@@ -582,6 +608,112 @@ exports.getPublicMemberPosts = async (req, res) => {
   }
 };
 
+// GET /api/members/active — Calculates top active members over last 30 days based on real community activity
+exports.getActiveMembers = async (req, res) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.json({ success: true, count: 0, members: [], data: [] });
+  }
+
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const members = await Member.find({ communityId: 'gfg-jamia-hamdard', status: 'Active' })
+      .select('_id userCode name username photo role teamName accountType')
+      .lean();
+
+    const [recentPosts, recentComments] = await Promise.all([
+      Post.find({
+        communityId: 'gfg-jamia-hamdard',
+        status: 'Active',
+        moderationStatus: { $nin: ['hidden', 'removed'] },
+        createdAt: { $gte: thirtyDaysAgo }
+      }).lean(),
+
+      Comment.find({
+        communityId: 'gfg-jamia-hamdard',
+        moderationStatus: { $nin: ['hidden', 'removed'] },
+        isDeleted: { $ne: true },
+        createdAt: { $gte: thirtyDaysAgo }
+      }).lean()
+    ]);
+
+    const memberScores = members.map((m) => {
+      const mId = m._id.toString();
+
+      const memberPosts = recentPosts.filter(p => p.authorRef && p.authorRef.toString() === mId);
+      const memberComments = recentComments.filter(c => c.authorRef && c.authorRef.toString() === mId);
+
+      const postsCount = memberPosts.length;
+      const topCommentsCount = memberComments.filter(c => !c.parentCommentId).length;
+      const repliesCount = memberComments.filter(c => c.parentCommentId).length;
+
+      const postLikesReceived = memberPosts.reduce((acc, p) => acc + (p.likesCount || 0), 0);
+      const commentLikesReceived = memberComments.reduce((acc, c) => acc + (c.likesCount || 0), 0);
+      const savesReceived = memberPosts.reduce((acc, p) => acc + (p.bookmarksCount || 0), 0);
+
+      const score = (postsCount * 10) +
+                    (topCommentsCount * 5) +
+                    (repliesCount * 3) +
+                    (postLikesReceived * 2) +
+                    (commentLikesReceived * 1) +
+                    (savesReceived * 3);
+
+      let lastActivityAt = null;
+      memberPosts.forEach(p => {
+        if (!lastActivityAt || new Date(p.createdAt) > lastActivityAt) lastActivityAt = new Date(p.createdAt);
+      });
+      memberComments.forEach(c => {
+        if (!lastActivityAt || new Date(c.createdAt) > lastActivityAt) lastActivityAt = new Date(c.createdAt);
+      });
+
+      return {
+        _id: m._id,
+        userCode: m.userCode || '',
+        fullName: m.name || 'Community Member',
+        name: m.name || 'Community Member',
+        username: m.username || m._id.toString(),
+        photo: m.photo || '',
+        avatar: { url: m.photo || '' },
+        role: m.role || 'Member',
+        teamName: m.teamName || 'General',
+        activityScore: score,
+        lastActivityAt: lastActivityAt || null
+      };
+    });
+
+    const activeOnly = memberScores.filter(m => m.activityScore > 0);
+    activeOnly.sort((a, b) => {
+      if (b.activityScore !== a.activityScore) return b.activityScore - a.activityScore;
+      return (b.lastActivityAt || 0) - (a.lastActivityAt || 0);
+    });
+
+    const resultMembers = activeOnly.length > 0
+      ? activeOnly.slice(0, 5)
+      : members.slice(0, 4).map(m => ({
+          _id: m._id,
+          userCode: m.userCode || '',
+          fullName: m.name,
+          name: m.name,
+          username: m.username || m._id.toString(),
+          photo: m.photo || '',
+          avatar: { url: m.photo || '' },
+          role: m.role || 'Member',
+          teamName: m.teamName || 'General',
+          activityScore: 0
+        }));
+
+    return res.json({
+      success: true,
+      count: resultMembers.length,
+      members: resultMembers,
+      data: resultMembers
+    });
+  } catch (err) {
+    console.error('[getActiveMembers Error]:', err);
+    return res.status(500).json({ success: false, error: err.message, members: [], data: [] });
+  }
+};
 // GET /api/members/active — Calculates top active members over last 30 days based on real community activity
 exports.getActiveMembers = async (req, res) => {
   if (mongoose.connection.readyState !== 1) {

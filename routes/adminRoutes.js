@@ -7,7 +7,9 @@ const {
   resetAdminPin,
   updateAdminAccess,
   revokeAdminAccess,
-  getAuditLogs
+  getAuditLogs,
+  getAuditLogsRetentionSummary,
+  cleanupAuditLogs
 } = require('../controllers/adminManagementController');
 
 const { getUserStats, getUsers, getUserById, getUserActivity } = require('../controllers/userDirectoryController');
@@ -25,7 +27,9 @@ router.post('/administrators/:id/reset-pin', authMiddleware, adminOnly, requireP
 router.patch('/administrators/:id', authMiddleware, adminOnly, requirePermission('manage_admins'), updateAdminAccess);
 router.delete('/administrators/:id', authMiddleware, adminOnly, requirePermission('manage_admins'), revokeAdminAccess);
 
-// Audit Logs
+// Audit Logs & Retention
+router.get('/audit-logs/retention-summary', authMiddleware, adminOnly, requirePermission('manage_admins'), getAuditLogsRetentionSummary);
+router.delete('/audit-logs/cleanup', authMiddleware, adminOnly, requirePermission('manage_admins'), cleanupAuditLogs);
 router.get('/audit-logs', authMiddleware, adminOnly, requirePermission('manage_admins'), getAuditLogs);
 
 module.exports = router;
