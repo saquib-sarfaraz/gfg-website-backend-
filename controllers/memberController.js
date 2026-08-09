@@ -30,9 +30,7 @@ const findMemberByAnyIdentifier = async (target, currentUser = null) => {
       }
       if (member) return member;
     }
-    // Fallback read resolution for unauthenticated /me requests
-    const fallback = await Member.findOne({ email: 'saquib@gfgcampus.org' });
-    if (fallback) return fallback;
+    return null;
   }
 
   // 2. Try User.memberRef & Member.userRef if target is a valid ObjectId
@@ -628,120 +626,14 @@ exports.getActiveMembers = async (req, res) => {
         status: 'Active',
         moderationStatus: { $nin: ['hidden', 'removed'] },
         createdAt: { $gte: thirtyDaysAgo }
-      }).lean(),
+      }).select('authorRef likesCount bookmarksCount createdAt').lean(),
 
       Comment.find({
         communityId: 'gfg-jamia-hamdard',
         moderationStatus: { $nin: ['hidden', 'removed'] },
         isDeleted: { $ne: true },
         createdAt: { $gte: thirtyDaysAgo }
-      }).lean()
-    ]);
-
-    const memberScores = members.map((m) => {
-      const mId = m._id.toString();
-
-      const memberPosts = recentPosts.filter(p => p.authorRef && p.authorRef.toString() === mId);
-      const memberComments = recentComments.filter(c => c.authorRef && c.authorRef.toString() === mId);
-
-      const postsCount = memberPosts.length;
-      const topCommentsCount = memberComments.filter(c => !c.parentCommentId).length;
-      const repliesCount = memberComments.filter(c => c.parentCommentId).length;
-
-      const postLikesReceived = memberPosts.reduce((acc, p) => acc + (p.likesCount || 0), 0);
-      const commentLikesReceived = memberComments.reduce((acc, c) => acc + (c.likesCount || 0), 0);
-      const savesReceived = memberPosts.reduce((acc, p) => acc + (p.bookmarksCount || 0), 0);
-
-      const score = (postsCount * 10) +
-                    (topCommentsCount * 5) +
-                    (repliesCount * 3) +
-                    (postLikesReceived * 2) +
-                    (commentLikesReceived * 1) +
-                    (savesReceived * 3);
-
-      let lastActivityAt = null;
-      memberPosts.forEach(p => {
-        if (!lastActivityAt || new Date(p.createdAt) > lastActivityAt) lastActivityAt = new Date(p.createdAt);
-      });
-      memberComments.forEach(c => {
-        if (!lastActivityAt || new Date(c.createdAt) > lastActivityAt) lastActivityAt = new Date(c.createdAt);
-      });
-
-      return {
-        _id: m._id,
-        userCode: m.userCode || '',
-        fullName: m.name || 'Community Member',
-        name: m.name || 'Community Member',
-        username: m.username || m._id.toString(),
-        photo: m.photo || '',
-        avatar: { url: m.photo || '' },
-        role: m.role || 'Member',
-        teamName: m.teamName || 'General',
-        activityScore: score,
-        lastActivityAt: lastActivityAt || null
-      };
-    });
-
-    const activeOnly = memberScores.filter(m => m.activityScore > 0);
-    activeOnly.sort((a, b) => {
-      if (b.activityScore !== a.activityScore) return b.activityScore - a.activityScore;
-      return (b.lastActivityAt || 0) - (a.lastActivityAt || 0);
-    });
-
-    const resultMembers = activeOnly.length > 0
-      ? activeOnly.slice(0, 5)
-      : members.slice(0, 4).map(m => ({
-          _id: m._id,
-          userCode: m.userCode || '',
-          fullName: m.name,
-          name: m.name,
-          username: m.username || m._id.toString(),
-          photo: m.photo || '',
-          avatar: { url: m.photo || '' },
-          role: m.role || 'Member',
-          teamName: m.teamName || 'General',
-          activityScore: 0
-        }));
-
-    return res.json({
-      success: true,
-      count: resultMembers.length,
-      members: resultMembers,
-      data: resultMembers
-    });
-  } catch (err) {
-    console.error('[getActiveMembers Error]:', err);
-    return res.status(500).json({ success: false, error: err.message, members: [], data: [] });
-  }
-};
-// GET /api/members/active — Calculates top active members over last 30 days based on real community activity
-exports.getActiveMembers = async (req, res) => {
-  if (mongoose.connection.readyState !== 1) {
-    return res.json({ success: true, count: 0, members: [], data: [] });
-  }
-
-  try {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const members = await Member.find({ communityId: 'gfg-jamia-hamdard', status: 'Active' })
-      .select('_id userCode name username photo role teamName accountType')
-      .lean();
-
-    const [recentPosts, recentComments] = await Promise.all([
-      Post.find({
-        communityId: 'gfg-jamia-hamdard',
-        status: 'Active',
-        moderationStatus: { $nin: ['hidden', 'removed'] },
-        createdAt: { $gte: thirtyDaysAgo }
-      }).lean(),
-
-      Comment.find({
-        communityId: 'gfg-jamia-hamdard',
-        moderationStatus: { $nin: ['hidden', 'removed'] },
-        isDeleted: { $ne: true },
-        createdAt: { $gte: thirtyDaysAgo }
-      }).lean()
+      }).select('authorRef likesCount createdAt parentCommentId').lean()
     ]);
 
     const memberScores = members.map((m) => {

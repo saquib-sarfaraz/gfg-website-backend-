@@ -40,6 +40,8 @@ const postSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 postSchema.index({ communityId: 1, createdAt: -1 });
+postSchema.index({ moderationStatus: 1, postType: 1, createdAt: -1 });
+postSchema.index({ authorRef: 1, createdAt: -1 });
 postSchema.index({ moderationStatus: 1, reportCount: -1 });
 
 module.exports = mongoose.model('Post', postSchema);

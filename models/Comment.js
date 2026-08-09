@@ -20,6 +20,7 @@ const commentSchema = new mongoose.Schema({
   deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Member' }
 }, { timestamps: true });
 
+commentSchema.index({ postId: 1, createdAt: 1 });
 commentSchema.index({ moderationStatus: 1, reportCount: -1 });
 
 module.exports = mongoose.model('Comment', commentSchema);
