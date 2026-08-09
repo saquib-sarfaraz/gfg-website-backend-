@@ -156,7 +156,7 @@ const resolveMemberFromReq = async (req) => {
   if (inputId && mongoose.Types.ObjectId.isValid(inputId)) {
     return inputId;
   }
-  return await getOrCreateDefaultMember();
+  return null;
 };
 
 exports.getPosts = async (req, res) => {
@@ -188,8 +188,10 @@ exports.getPosts = async (req, res) => {
   }
 
   try {
+    if (req.logStep) req.logStep('start_get_posts');
     const { type, tag, search, pinnedOnly, filter: navFilter, memberId: inputMemberId } = req.query;
     const memberId = inputMemberId && mongoose.Types.ObjectId.isValid(inputMemberId) ? inputMemberId : await resolveMemberFromReq(req);
+    if (req.logStep) req.logStep('resolve_member_done');
 
     const filterQuery = {
       communityId: 'gfg-jamia-hamdard',
@@ -217,10 +219,12 @@ exports.getPosts = async (req, res) => {
       filterQuery.authorRef = memberId;
     }
 
+    if (req.logStep) req.logStep('posts_query_start');
     let posts = await Post.find(filterQuery)
       .populate('authorRef', 'name photo role teamName email username')
       .sort({ isPinned: -1, createdAt: -1 })
       .lean();
+    if (req.logStep) req.logStep('posts_query_done');
 
     // Attach user isLiked & isBookmarked flags
     if (memberId && mongoose.Types.ObjectId.isValid(memberId)) {
@@ -238,6 +242,7 @@ exports.getPosts = async (req, res) => {
         isLiked: likedSet.has(p._id.toString()),
         isBookmarked: bookmarkedSet.has(p._id.toString())
       }));
+      if (req.logStep) req.logStep('attach_user_flags_done');
     } else {
       posts = posts.map(p => ({ ...p, isLiked: false, isBookmarked: false }));
     }

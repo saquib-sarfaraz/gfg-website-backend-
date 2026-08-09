@@ -27,6 +27,33 @@ const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
 
+// ─── Latency Tracking & Correlation Middleware (Non-Sensitive Threshold Logger) ───
+app.use((req, res, next) => {
+  const reqId = 'req_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 7);
+  req.reqId = reqId;
+  const startHr = process.hrtime.bigint();
+  const steps = [];
+
+  req.logStep = (name) => {
+    const elapsed = Number(process.hrtime.bigint() - startHr) / 1e6;
+    steps.push(`${name}=${elapsed.toFixed(1)}ms`);
+  };
+
+  res.on('finish', () => {
+    const totalMs = Number(process.hrtime.bigint() - startHr) / 1e6;
+    const isDebug = process.env.LATENCY_DEBUG === 'true';
+    const isSlow = totalMs >= 500;
+
+    if (isDebug || isSlow) {
+      const cleanPath = (req.originalUrl || req.url || '').split('?')[0];
+      const stepStr = steps.length > 0 ? ` [${steps.join(', ')}]` : '';
+      console.log(`[PERF] ${reqId} ${req.method} ${cleanPath} status=${res.statusCode} total=${totalMs.toFixed(1)}ms${stepStr}`);
+    }
+  });
+
+  next();
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));

@@ -335,14 +335,18 @@ exports.getMe = async (req, res) => {
     const decoded = jwt.verify(token, JWT_SECRET);
 
     if (mongoose.connection.readyState === 1) {
+      if (req.logStep) req.logStep('user_query_start');
       const user = await User.findById(decoded.id).populate('memberRef');
       if (!user) {
         return res.status(404).json({ success: false, message: 'User not found.' });
       }
+      if (req.logStep) req.logStep('user_query_done');
 
-      let member = user.memberRef || await Member.findOne({ email: user.email });
-
-      const adminAccess = await AdminAccess.findOne({ userRef: user._id, status: 'Active' });
+      const [member, adminAccess] = await Promise.all([
+        user.memberRef ? Promise.resolve(user.memberRef) : Member.findOne({ email: user.email }),
+        AdminAccess.findOne({ userRef: user._id, status: 'Active' })
+      ]);
+      if (req.logStep) req.logStep('parallel_db_done');
 
       return res.json({
         success: true,
