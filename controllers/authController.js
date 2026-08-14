@@ -9,6 +9,26 @@ const { JWT_SECRET } = require('../middleware/auth');
 
 const { generateUserCode } = require('../utils/userCodeGenerator');
 
+// Cookie Helper Utilities for Persistent Session Refresh Tokens
+const getCookieFromReq = (req, cookieName) => {
+  const cookieHeader = req.headers?.cookie;
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${cookieName}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+};
+
+const setRefreshCookie = (res, refreshToken) => {
+  try {
+    res.cookie('gfg_refresh_token', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+    });
+  } catch (e) {}
+};
+
 // SIGNUP HANDLER (Public User Signup -> Visitor)
 exports.signup = async (req, res) => {
   try {
@@ -99,6 +119,12 @@ exports.signup = async (req, res) => {
         JWT_SECRET,
         { expiresIn: '7d' }
       );
+      const refreshToken = jwt.sign(
+        { id: newUser._id, type: 'refresh' },
+        JWT_SECRET,
+        { expiresIn: '30d' }
+      );
+      setRefreshCookie(res, refreshToken);
 
       return res.status(201).json({
         success: true,
@@ -163,6 +189,12 @@ exports.login = async (req, res) => {
         JWT_SECRET,
         { expiresIn: '7d' }
       );
+      const refreshToken = jwt.sign(
+        { id: user._id, type: 'refresh' },
+        JWT_SECRET,
+        { expiresIn: '30d' }
+      );
+      setRefreshCookie(res, refreshToken);
 
       return res.json({
         success: true,
@@ -296,6 +328,12 @@ exports.adminLogin = async (req, res) => {
       JWT_SECRET,
       { expiresIn: '12h' }
     );
+    const refreshToken = jwt.sign(
+      { id: user._id, type: 'refresh' },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    setRefreshCookie(res, refreshToken);
 
     let member = user.memberRef || await Member.findOne({ email: normalizedEmail });
 
@@ -482,7 +520,71 @@ exports.changeAdminPin = async (req, res) => {
   }
 };
 
+// SILENT REFRESH TOKEN HANDLER (Extends session without re-prompting login)
+exports.refreshToken = async (req, res) => {
+  try {
+    const cookieToken = getCookieFromReq(req, 'gfg_refresh_token');
+    const rawToken = cookieToken || req.body?.refreshToken || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.split(' ')[1] : null);
+
+    if (!rawToken) {
+      return res.status(401).json({ success: false, message: 'No refresh session token provided.' });
+    }
+
+    const decoded = jwt.verify(rawToken, JWT_SECRET);
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ success: false, message: 'Database offline.' });
+    }
+
+    const user = await User.findById(decoded.id).populate('memberRef');
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'User record not found.' });
+    }
+
+    const [member, adminAccess] = await Promise.all([
+      user.memberRef ? Promise.resolve(user.memberRef) : Member.findOne({ email: user.email }),
+      AdminAccess.findOne({ userRef: user._id, status: 'Active' })
+    ]);
+
+    const newAccessToken = jwt.sign(
+      { id: user._id, username: user.username, email: user.email, role: member?.role || user.role, isAdmin: !!adminAccess },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const newRefreshToken = jwt.sign(
+      { id: user._id, type: 'refresh' },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    setRefreshCookie(res, newRefreshToken);
+
+    return res.json({
+      success: true,
+      token: newAccessToken,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        collegeName: user.collegeName
+      },
+      member: member || null,
+      adminAccess: adminAccess ? {
+        adminRole: adminAccess.adminRole,
+        permissions: adminAccess.permissions,
+        lastLoginAt: adminAccess.lastLoginAt
+      } : null
+    });
+  } catch (err) {
+    return res.status(401).json({ success: false, message: 'Invalid or expired refresh token.' });
+  }
+};
+
 // LOGOUT HANDLER
 exports.logout = async (req, res) => {
+  try {
+    res.clearCookie('gfg_refresh_token', { path: '/' });
+  } catch (e) {}
   return res.json({ success: true, message: 'Logged out successfully.' });
 };

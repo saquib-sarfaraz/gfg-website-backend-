@@ -101,6 +101,7 @@ app.use('/media', mediaRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/posts', postRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
+app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
 
 // Global Error Handler

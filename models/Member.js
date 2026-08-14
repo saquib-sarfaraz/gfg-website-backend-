@@ -28,7 +28,7 @@ const memberSchema = new mongoose.Schema({
   userRef: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   status: { type: String, enum: ['Active', 'Alumni', 'Inactive', 'Suspended', 'Revoked'], default: 'Active' },
   accountType: { type: String, enum: ['Visitor', 'Member'], default: 'Visitor' },
-  membershipId: { type: String, sparse: true },
+  membershipId: { type: String, unique: true, sparse: true, trim: true },
   membershipStatus: { type: String, enum: ['active', 'pending', 'inactive', 'expired', 'suspended', 'revoked'], default: 'pending' },
   verificationId: { type: String, sparse: true, index: true },
   session: { type: String, default: '2026–27' },

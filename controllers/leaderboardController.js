@@ -120,9 +120,37 @@ const MOCK_LEADERBOARD = [
 
 exports.getLeaderboard = async (req, res) => {
   const timeframe = req.query.timeframe || 'month'; // 'month' (default), 'week', 'all'
+  const pageParam = req.query.page ? parseInt(req.query.page, 10) : null;
+  const limitParam = req.query.limit ? parseInt(req.query.limit, 10) : null;
+  const LEADERBOARD_MIN_SCORE = process.env.LEADERBOARD_MIN_SCORE ? parseInt(process.env.LEADERBOARD_MIN_SCORE, 10) : 0;
+
+  const paginateHelper = (items) => {
+    const filtered = items.filter(item => (item.points || 0) >= LEADERBOARD_MIN_SCORE);
+    if (pageParam && limitParam && pageParam > 0 && limitParam > 0) {
+      const total = filtered.length;
+      const totalPages = Math.ceil(total / limitParam) || 1;
+      const startIndex = (pageParam - 1) * limitParam;
+      const paginatedData = filtered.slice(startIndex, startIndex + limitParam);
+      const hasMore = pageParam < totalPages;
+
+      return {
+        success: true,
+        timeframe,
+        data: paginatedData,
+        pagination: {
+          page: pageParam,
+          limit: limitParam,
+          total,
+          totalPages,
+          hasMore
+        }
+      };
+    }
+    return { success: true, timeframe, data: filtered };
+  };
 
   if (mongoose.connection.readyState !== 1) {
-    return res.json({ success: true, timeframe, data: MOCK_LEADERBOARD });
+    return res.json(paginateHelper(MOCK_LEADERBOARD));
   }
 
   try {
@@ -137,7 +165,7 @@ exports.getLeaderboard = async (req, res) => {
     }
 
     const members = await Member.find({ communityId: 'gfg-jamia-hamdard', status: 'Active' })
-      .select('name username photo role teamName accountType membershipId verificationId')
+      .select('name username photo role teamName accountType membershipId verificationId membershipStatus status')
       .lean();
 
     const postQuery = {
@@ -155,8 +183,8 @@ exports.getLeaderboard = async (req, res) => {
     if (startDate) commentQuery.createdAt = { $gte: startDate };
 
     const [activePosts, activeComments] = await Promise.all([
-      Post.find(postQuery).lean(),
-      Comment.find(commentQuery).lean()
+      Post.find(postQuery).select('authorRef likesCount bookmarksCount isPinned').lean(),
+      Comment.find(commentQuery).select('authorRef parentCommentId likesCount').lean()
     ]);
 
     const scoredList = members.map((m) => {
@@ -232,9 +260,9 @@ exports.getLeaderboard = async (req, res) => {
       };
     });
 
-    return res.json({ success: true, timeframe, data: rankedData });
+    return res.json(paginateHelper(rankedData));
   } catch (err) {
     console.error('[getLeaderboard Error]:', err);
-    return res.json({ success: true, timeframe, data: MOCK_LEADERBOARD });
+    return res.json(paginateHelper(MOCK_LEADERBOARD));
   }
 };

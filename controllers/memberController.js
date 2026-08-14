@@ -73,10 +73,13 @@ exports.getMembers = async (req, res) => {
     const query = { communityId: 'gfg-jamia-hamdard' };
 
     if (search) {
+      const cleanSearch = search.trim();
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { membershipId: { $regex: search, $options: 'i' } }
+        { name: { $regex: cleanSearch, $options: 'i' } },
+        { email: { $regex: cleanSearch, $options: 'i' } },
+        { username: { $regex: cleanSearch, $options: 'i' } },
+        { membershipId: { $regex: cleanSearch, $options: 'i' } },
+        { userCode: { $regex: cleanSearch, $options: 'i' } }
       ];
     }
 
@@ -114,6 +117,9 @@ exports.getMembers = async (req, res) => {
     if (status && status !== 'All') {
       if (status === 'pending') {
         query.membershipStatus = { $regex: /^pending$/i };
+      } else if (status === 'Active') {
+        query.status = 'Active';
+        query.membershipStatus = { $nin: ['suspended', 'revoked', 'inactive', 'expired'] };
       } else {
         query.status = status;
       }
@@ -167,6 +173,30 @@ exports.updateMember = async (req, res) => {
   }
 };
 
+// Generate sequential unique Member ID based on highest existing numerical suffix
+const generateUniqueMembershipId = async (year = '2026') => {
+  const existingMembers = await Member.find(
+    { membershipId: { $regex: new RegExp(`^GFG-JH-${year}-\\d+$`, 'i') } },
+    { membershipId: 1 }
+  ).lean();
+
+  let maxSeq = 0;
+  existingMembers.forEach(m => {
+    if (m.membershipId) {
+      const match = m.membershipId.match(/-(\d+)$/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (!isNaN(num) && num > maxSeq) {
+          maxSeq = num;
+        }
+      }
+    }
+  });
+
+  const nextSeq = maxSeq + 1;
+  return `GFG-JH-${year}-${String(nextSeq).padStart(3, '0')}`;
+};
+
 // Change Membership & Official Role (Visitor -> Member promotion handler)
 exports.updateMembership = async (req, res) => {
   const { id } = req.params;
@@ -195,10 +225,9 @@ exports.updateMembership = async (req, res) => {
     if (session) member.session = session;
     if (teamName) member.teamName = teamName;
 
-    // Auto generate Member ID if promoted to official Member
+    // Auto generate unique Member ID based on max sequence if promoted to official Member
     if ((accountType === 'Member' || accountType === 'member') && !member.membershipId) {
-      const count = await Member.countDocuments({ accountType: { $regex: /^member$/i } });
-      member.membershipId = `GFG-JH-2026-${String(count + 1).padStart(3, '0')}`;
+      member.membershipId = await generateUniqueMembershipId('2026');
       member.verificationId = `v_${member._id}_${Date.now()}`;
       member.issueDate = new Date();
     }
@@ -539,6 +568,11 @@ exports.getPublicProfile = async (req, res) => {
       instagram: member.instagram || '',
       website: member.website || '',
       session: member.session || '2026–27',
+      membershipId: member.membershipId || '',
+      membershipStatus: member.membershipStatus || 'pending',
+      status: member.status || 'Active',
+      verificationId: member.verificationId || member.membershipId || member._id?.toString(),
+      issueDate: member.issueDate || member.createdAt,
       joinedAt: member.createdAt,
       postsCount
     };
