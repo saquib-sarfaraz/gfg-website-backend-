@@ -196,8 +196,8 @@ exports.getAdminModerationQueue = async (req, res) => {
     const hiddenComments = await Comment.find({ moderationStatus: 'hidden' }).populate('authorRef', 'name photo role teamName');
 
     const allReports = await Report.find()
-      .populate('reporterRef', 'name email role')
-      .populate('targetAuthorRef', 'name email role')
+      .populate('reporterRef', 'name email role photo username')
+      .populate('targetAuthorRef', 'name email role photo username')
       .sort({ createdAt: -1 });
 
     const reviewQueue = [
@@ -234,6 +234,95 @@ exports.getAdminModerationQueue = async (req, res) => {
   }
 };
 
+/**
+ * Super Admin: Get Full Details & Live Target Content for Moderation Review
+ * GET /api/reports/admin/:targetType/:targetId
+ */
+exports.getReportedTargetDetails = async (req, res) => {
+  const { targetType, targetId } = req.params;
+
+  if (!['post', 'comment'].includes(targetType)) {
+    return res.status(400).json({ success: false, message: 'Invalid target type: must be "post" or "comment"' });
+  }
+
+  if (mongoose.connection.readyState !== 1) {
+    return res.json({
+      success: true,
+      exists: true,
+      data: {
+        targetType,
+        targetId,
+        content: 'Sample post content for preview',
+        authorRef: { name: 'Member User', photo: '', role: 'Member' }
+      }
+    });
+  }
+
+  try {
+    let target = null;
+    let parentPost = null;
+
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      if (targetType === 'post') {
+        target = await Post.findById(targetId)
+          .populate('authorRef', 'name photo username role email memberId')
+          .lean();
+      } else {
+        target = await Comment.findById(targetId)
+          .populate('authorRef', 'name photo username role email memberId')
+          .lean();
+
+        if (target && target.postId && mongoose.Types.ObjectId.isValid(target.postId)) {
+          parentPost = await Post.findById(target.postId)
+            .populate('authorRef', 'name photo username role email')
+            .lean();
+        }
+      }
+    }
+
+    // Fetch all report logs for this specific target
+    const reports = await Report.find({ targetType, targetRef: targetId })
+      .populate('reporterRef', 'name photo username role email memberId')
+      .populate('targetAuthorRef', 'name photo username role email memberId')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const reasonBreakdown = {};
+    reports.forEach(r => {
+      if (r.reason) {
+        reasonBreakdown[r.reason] = (reasonBreakdown[r.reason] || 0) + 1;
+      }
+    });
+
+    if (!target) {
+      return res.json({
+        success: true,
+        exists: false,
+        targetType,
+        targetId,
+        reports,
+        totalReportsCount: reports.length,
+        reasonBreakdown,
+        message: 'Content no longer available. This post or comment was removed or deleted.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      exists: true,
+      targetType,
+      targetId,
+      target,
+      parentPost,
+      reports,
+      totalReportsCount: reports.length,
+      reasonBreakdown
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 // Super Admin Action: Review Reported Item (Keep / Hide / Delete / Restore)
 exports.reviewModerationItem = async (req, res) => {
   const { targetType, targetId } = req.params;
@@ -256,10 +345,30 @@ exports.reviewModerationItem = async (req, res) => {
   }
 
   try {
-    let targetObj = targetType === 'post' ? await Post.findById(targetId) : await Comment.findById(targetId);
+    let targetObj = null;
+    if (mongoose.Types.ObjectId.isValid(targetId)) {
+      targetObj = targetType === 'post' ? await Post.findById(targetId) : await Comment.findById(targetId);
+    }
 
+    // If target content was already deleted or doesn't exist, still resolve/dismiss all orphaned report documents!
     if (!targetObj) {
-      return res.status(404).json({ success: false, message: 'Target content not found' });
+      const statusToSet = action === 'keep' ? 'dismissed' : 'resolved';
+      await Report.updateMany(
+        { targetType, targetRef: targetId, status: { $in: ['pending', 'under_review'] } },
+        {
+          status: statusToSet,
+          reviewedAt: new Date(),
+          reviewedBy: moderatorId,
+          resolutionAction: action,
+          moderatorNotes: moderatorReason || notes || 'Target content already removed or missing.'
+        }
+      );
+
+      return res.json({
+        success: true,
+        message: `Report resolved. Target content was already deleted or missing.`,
+        data: { targetType, targetId, newStatus: 'removed' }
+      });
     }
 
     if (action === 'keep') {

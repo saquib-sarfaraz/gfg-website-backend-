@@ -15,6 +15,11 @@ const siteSettingsSchema = new mongoose.Schema({
     linkedin: { type: String, default: 'https://linkedin.com' },
     instagram: { type: String, default: 'https://instagram.com' },
     youtube: { type: String, default: 'https://youtube.com' }
+  },
+  launchExperience: {
+    enabled: { type: Boolean, default: false },
+    duration: { type: Number, default: 7, enum: [5, 7, 10] },
+    replayMode: { type: String, default: 'first_visit', enum: ['first_visit', 'session'] }
   }
 }, { timestamps: true });
 
